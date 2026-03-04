@@ -7,7 +7,6 @@ import io
 import os
 import asyncio
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-from astrbot.api.star import StarTools
 import tempfile
 from PIL import Image as PILImage, ImageDraw, ImageFont, ImageFilter
 
