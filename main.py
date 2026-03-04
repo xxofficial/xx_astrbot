@@ -275,7 +275,14 @@ class MyPlugin(Star):
             url = await self.html_render(
                 MATCHES_TMPL,
                 {"steamid": steamid, "matches": match_data},
-                options={"omit_background": True}
+                options={
+					"quality": 100,
+					"timeout": 45000,
+					"device_scale_factor_level": "ultra",
+					"full_page": False,
+					"omit_background": True,
+					"type": "png"
+				}
             )
 
             yield event.image_result(url)
