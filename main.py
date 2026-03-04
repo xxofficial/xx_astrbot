@@ -71,23 +71,6 @@ MATCHES_TMPL = '''
             {% else %}
             <div style="width:100%;height:100%;background:#333;display:flex;align-items:center;justify-content:center;color:#888;font-size:11px;">N/A</div>
             {% endif %}
-            {% if m.hero_level %}
-            <div style="
-                position: absolute;
-                bottom: 2px;
-                right: 2px;
-                background: rgba(0,0,0,0.75);
-                color: #ffd750;
-                font-size: 11px;
-                font-weight: bold;
-                border-radius: 50%;
-                width: 18px;
-                height: 18px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            ">{{ m.hero_level }}</div>
-            {% endif %}
         </div>
 
         <!-- KDA 分数 -->
@@ -216,7 +199,6 @@ class MyPlugin(Star):
                 'is_win': is_win,
                 'hero_img': hero_img,
                 'hero_name': hero_name,
-                'hero_level': hero_level,
                 'kda_score': kda_score,
                 'kills': k,
                 'deaths': d,
