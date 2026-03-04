@@ -10,18 +10,6 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 import tempfile
 from PIL import Image as PILImage, ImageDraw, ImageFont, ImageFilter
 
-# Lobby type 映射
-LOBBY_TYPE_MAP = {
-    0: "普通匹配",
-    1: "练习赛",
-    2: "锦标赛",
-    4: "自定义",
-    5: "天梯模式",
-    6: "团队天梯",
-    7: "天梯模式",
-    9: "自走棋",
-}
-
 @register("xx_bot", "XX", "自用插件", "1.0.0")
 class MyPlugin(Star):
     def __init__(self, context: Context):
@@ -213,7 +201,7 @@ class MyPlugin(Star):
             is_win = (player_slot < 128) == radiant_win
             kda_score = round((k + a) / max(d, 1), 1)
             duration_str = f"{duration // 60}:{duration % 60:02d}"
-            lobby_str = LOBBY_TYPE_MAP.get(lobby_type, "其他模式")
+            lobby_str = "天梯模式"
 
             # ---------- 卡片背景 ----------
             card_rect = [PADDING, y_start, CARD_WIDTH - PADDING, y_start + ROW_HEIGHT]
