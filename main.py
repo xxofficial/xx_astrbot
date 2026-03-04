@@ -1,12 +1,11 @@
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, register,StarTools
 from astrbot.api import logger
 import urllib.request
 import json
 import io
 import os
 import asyncio
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 import tempfile
 from PIL import Image as PILImage, ImageDraw, ImageFont, ImageFilter
 
@@ -15,7 +14,7 @@ class MyPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self._hero_cache = None  # hero_id -> {name, localized_name}
-        self._hero_img_dir = os.path.join(get_astrbot_data_path(), "plugin_data", "xx_bot", "heroes")
+        self._hero_img_dir = StarTools.get_data_dir("astrbot_plugin_xx_bot")
 
     async def initialize(self):
         """插件初始化：预加载英雄数据和头像缓存"""
