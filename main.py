@@ -8,16 +8,6 @@ import asyncio
 import base64
 
 # Lobby type 映射
-LOBBY_TYPE_MAP = {
-    0: "普通匹配",
-    1: "练习赛",
-    2: "锦标赛",
-    4: "自定义",
-    5: "天梯模式",
-    6: "团队天梯",
-    7: "天梯模式",
-    9: "自走棋",
-}
 
 # HTML + Jinja2 模板
 MATCHES_TMPL = '''
@@ -118,12 +108,6 @@ MATCHES_TMPL = '''
             <div style="color: #a0a0a8; font-size: 12px; margin-top: 4px;">{{ m.lobby_str }}</div>
             <div style="color: #a0a0a8; font-size: 12px; margin-top: 2px;">{{ m.duration_str }}</div>
         </div>
-
-        <!-- GPM / XPM -->
-        <div style="padding-right: 20px; text-align: right; min-width: 90px;">
-            <div style="color: #ffd750; font-size: 13px; font-weight: 500;">GPM {{ m.gpm }}</div>
-            <div style="color: #78b4ff; font-size: 13px; font-weight: 500; margin-top: 4px;">XPM {{ m.xpm }}</div>
-        </div>
     </div>
     {% endfor %}
 </div>
@@ -218,12 +202,8 @@ class MyPlugin(Star):
             d = m.get('deaths', 0)
             a = m.get('assists', 0)
             duration = m.get('duration', 0)
-            lobby_type = m.get('lobby_type', 0)
             player_slot = m.get('player_slot', 0)
             radiant_win = m.get('radiant_win', True)
-            hero_level = m.get('hero_level', 0) if 'hero_level' in m else None
-            gpm = m.get('gold_per_min', 0)
-            xpm = m.get('xp_per_min', 0)
 
             is_win = (player_slot < 128) == radiant_win
             kda_score = round((k + a) / max(d, 1), 1)
@@ -241,10 +221,8 @@ class MyPlugin(Star):
                 'kills': k,
                 'deaths': d,
                 'assists': a,
-                'lobby_str': LOBBY_TYPE_MAP.get(lobby_type, "其他模式"),
+                'lobby_str': "天梯模式",
                 'duration_str': f"{duration // 60}:{duration % 60:02d}",
-                'gpm': gpm,
-                'xpm': xpm,
             })
         return result
 
