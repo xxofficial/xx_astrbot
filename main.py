@@ -1,13 +1,133 @@
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from astrbot.api.star import Context, Star, register,StarTools
+from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 import urllib.request
 import json
-import io
 import os
 import asyncio
-import tempfile
-from PIL import Image as PILImage, ImageDraw, ImageFont, ImageFilter
+import base64
+
+# Lobby type 映射
+LOBBY_TYPE_MAP = {
+    0: "普通匹配",
+    1: "练习赛",
+    2: "锦标赛",
+    4: "自定义",
+    5: "天梯模式",
+    6: "团队天梯",
+    7: "天梯模式",
+    9: "自走棋",
+}
+
+# HTML + Jinja2 模板
+MATCHES_TMPL = '''
+<div style="
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    padding: 24px;
+    min-width: 680px;
+    max-width: 720px;
+">
+    <!-- 标题 -->
+    <div style="
+        color: #e0e0e0;
+        font-size: 18px;
+        font-weight: 600;
+        margin-bottom: 16px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+    ">
+        SteamID {{ steamid }} 的最近 {{ matches|length }} 场天梯对局
+    </div>
+
+    {% for m in matches %}
+    <div style="
+        display: flex;
+        align-items: center;
+        background: {{ 'rgba(40, 75, 50, 0.85)' if m.is_win else 'rgba(80, 35, 35, 0.85)' }};
+        border-radius: 10px;
+        margin-bottom: 8px;
+        overflow: hidden;
+        height: 88px;
+        border-left: 4px solid {{ '#3caa5a' if m.is_win else '#d44' }};
+    ">
+        <!-- 胜负标记 -->
+        <div style="
+            width: 52px;
+            min-width: 52px;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: {{ 'rgba(60, 170, 90, 0.6)' if m.is_win else 'rgba(200, 60, 60, 0.6)' }};
+            color: white;
+            font-size: 13px;
+            font-weight: 700;
+        ">{{ '胜利' if m.is_win else '失败' }}</div>
+
+        <!-- 英雄头像 -->
+        <div style="
+            width: 60px;
+            height: 60px;
+            margin: 0 12px;
+            border-radius: 8px;
+            overflow: hidden;
+            flex-shrink: 0;
+            position: relative;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        ">
+            {% if m.hero_img %}
+            <img src="{{ m.hero_img }}" style="width: 100%; height: 100%; object-fit: cover;" />
+            {% else %}
+            <div style="width:100%;height:100%;background:#333;display:flex;align-items:center;justify-content:center;color:#888;font-size:11px;">N/A</div>
+            {% endif %}
+            {% if m.hero_level %}
+            <div style="
+                position: absolute;
+                bottom: 2px;
+                right: 2px;
+                background: rgba(0,0,0,0.75);
+                color: #ffd750;
+                font-size: 11px;
+                font-weight: bold;
+                border-radius: 50%;
+                width: 18px;
+                height: 18px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            ">{{ m.hero_level }}</div>
+            {% endif %}
+        </div>
+
+        <!-- KDA 分数 -->
+        <div style="min-width: 90px; text-align: center;">
+            <div style="color: #f0f0f0; font-size: 28px; font-weight: 700; line-height: 1.1;">{{ m.kda_score }}</div>
+            <div style="color: #a0a0a8; font-size: 12px; margin-top: 4px;">
+                <span style="color: #64dc78;">{{ m.kills }}</span>
+                <span style="color: #888;"> / </span>
+                <span style="color: #f05050;">{{ m.deaths }}</span>
+                <span style="color: #888;"> / </span>
+                <span style="color: #78b4ff;">{{ m.assists }}</span>
+            </div>
+        </div>
+
+        <!-- 英雄名 + 模式 + 时长 -->
+        <div style="flex: 1; padding: 0 12px; min-width: 0;">
+            <div style="color: #f0f0f0; font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ m.hero_name }}</div>
+            <div style="color: #a0a0a8; font-size: 12px; margin-top: 4px;">{{ m.lobby_str }}</div>
+            <div style="color: #a0a0a8; font-size: 12px; margin-top: 2px;">{{ m.duration_str }}</div>
+        </div>
+
+        <!-- GPM / XPM -->
+        <div style="padding-right: 20px; text-align: right; min-width: 90px;">
+            <div style="color: #ffd750; font-size: 13px; font-weight: 500;">GPM {{ m.gpm }}</div>
+            <div style="color: #78b4ff; font-size: 13px; font-weight: 500; margin-top: 4px;">XPM {{ m.xpm }}</div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+'''
 
 @register("xx_bot", "XX", "自用插件", "1.0.0")
 class MyPlugin(Star):
@@ -74,117 +194,25 @@ class MyPlugin(Star):
             logger.error(f"下载英雄头像失败 ({hero_name}): {e}")
             return False
 
-    def _load_hero_image(self, hero_name: str) -> PILImage.Image | None:
-        """从本地文件缓存加载英雄头像"""
+    def _get_hero_img_data_url(self, hero_name: str) -> str:
+        """获取英雄头像的 data URL（用于 HTML 内嵌图片）"""
         local_path = os.path.join(self._hero_img_dir, f"{hero_name}.png")
         if not os.path.exists(local_path):
-            # 本地不存在，尝试下载
             if not self._download_hero_image(hero_name):
-                return None
+                return ""
         try:
-            return PILImage.open(local_path).convert("RGBA")
+            with open(local_path, 'rb') as f:
+                img_data = f.read()
+            b64 = base64.b64encode(img_data).decode('ascii')
+            return f"data:image/png;base64,{b64}"
         except Exception as e:
-            logger.error(f"加载英雄头像失败 ({hero_name}): {e}")
-            return None
+            logger.error(f"读取英雄头像失败 ({hero_name}): {e}")
+            return ""
 
-    def _get_font(self, size: int) -> ImageFont.FreeTypeFont:
-        """获取中文字体（Linux 服务器环境）"""
-        font_paths = [
-            # Linux 常见中文字体 (apt install fonts-noto-cjk-extra)
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.otf",
-            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-            "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-            # Windows 备用
-            "C:/Windows/Fonts/msyh.ttc",
-            "C:/Windows/Fonts/simhei.ttf",
-        ]
-        for fp in font_paths:
-            if os.path.exists(fp):
-                try:
-                    return ImageFont.truetype(fp, size)
-                except Exception:
-                    continue
-
-        # 如果系统没有中文字体，尝试从国内可访问的镜像下载
-        cache_font = os.path.join(tempfile.gettempdir(), "NotoSansSC-Regular.ttf")
-        if os.path.exists(cache_font):
-            try:
-                return ImageFont.truetype(cache_font, size)
-            except Exception:
-                pass
-
-        font_urls = [
-            "https://cdn.npmmirror.com/packages/@aspect-build/noto-sans-sc/0.0.0/noto-sans-sc-0.0.0.tgz",
-            "https://raw.gitmirror.com/google/fonts/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf",
-            "https://github.com/google/fonts/raw/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf",
-        ]
-        for font_url in font_urls:
-            try:
-                logger.info(f"系统未找到中文字体，正在下载: {font_url}")
-                req = urllib.request.Request(font_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    with open(cache_font, 'wb') as f:
-                        f.write(resp.read())
-                return ImageFont.truetype(cache_font, size)
-            except Exception as e:
-                logger.warning(f"下载字体失败({font_url}): {e}")
-                continue
-
-        logger.error("所有字体源均失败，建议在服务器执行: apt install -y fonts-noto-cjk-extra")
-        return ImageFont.load_default()
-
-    def _render_matches_image(self, matches: list, steamid: str, heroes: dict) -> PILImage.Image:
-        """渲染对局结果图片"""
-        # ========== 布局常量 ==========
-        ROW_HEIGHT = 100
-        CARD_WIDTH = 700
-        PADDING = 16
-        HERO_IMG_SIZE = 64
-        CARD_RADIUS = 12
-        ROW_GAP = 8
-
-        # ========== 字体 ==========
-        font_title = self._get_font(20)
-        font_big = self._get_font(32)
-        font_mid = self._get_font(16)
-        font_small = self._get_font(13)
-
-        # ========== 颜色 ==========
-        BG_COLOR = (30, 30, 40, 255)
-        CARD_WIN = (35, 60, 40, 240)
-        CARD_LOSE = (65, 35, 35, 240)
-        WIN_BADGE = (60, 170, 90)
-        LOSE_BADGE = (200, 60, 60)
-        TEXT_WHITE = (240, 240, 240)
-        TEXT_GRAY = (160, 160, 170)
-        TEXT_GOLD = (255, 215, 80)
-        KILL_COLOR = (100, 220, 120)
-        DEATH_COLOR = (240, 80, 80)
-        ASSIST_COLOR = (120, 180, 255)
-
-        # ========== 计算画布大小 ==========
-        title_height = 50
-        total_height = title_height + len(matches) * (ROW_HEIGHT + ROW_GAP) + PADDING
-        img = PILImage.new("RGBA", (CARD_WIDTH, total_height), BG_COLOR)
-        draw = ImageDraw.Draw(img)
-
-        # ========== 标题 ==========
-        title_text = f"SteamID {steamid} 的最近 {len(matches)} 场对局"
-        draw.text((PADDING, 14), title_text, fill=TEXT_WHITE, font=font_title)
-
-        # ========== 渲染每行对局 ==========
-        for i, m in enumerate(matches):
-            y_start = title_height + i * (ROW_HEIGHT + ROW_GAP)
-
+    def _prepare_match_data(self, matches: list, heroes: dict) -> list:
+        """预处理对局数据，供 Jinja2 模板使用"""
+        result = []
+        for m in matches:
             hero_id = m.get('hero_id', 0)
             k = m.get('kills', 0)
             d = m.get('deaths', 0)
@@ -199,88 +227,26 @@ class MyPlugin(Star):
 
             is_win = (player_slot < 128) == radiant_win
             kda_score = round((k + a) / max(d, 1), 1)
-            duration_str = f"{duration // 60}:{duration % 60:02d}"
-            lobby_str = "天梯模式"
 
-            # ---------- 卡片背景 ----------
-            card_rect = [PADDING, y_start, CARD_WIDTH - PADDING, y_start + ROW_HEIGHT]
-            card_color = CARD_WIN if is_win else CARD_LOSE
-            draw.rounded_rectangle(card_rect, radius=CARD_RADIUS, fill=card_color)
-
-            # ---------- 胜负标记 ----------
-            badge_w = 50
-            badge_rect = [PADDING, y_start, PADDING + badge_w, y_start + ROW_HEIGHT]
-            badge_color = WIN_BADGE if is_win else LOSE_BADGE
-            # 画左侧圆角矩形色块
-            draw.rounded_rectangle(badge_rect, radius=CARD_RADIUS, fill=badge_color)
-            # 右侧覆盖一个直角矩形，让右边不圆角
-            draw.rectangle([PADDING + badge_w - CARD_RADIUS, y_start, PADDING + badge_w, y_start + ROW_HEIGHT], fill=badge_color)
-
-            win_text = "胜利" if is_win else "失败"
-            bbox = draw.textbbox((0, 0), win_text, font=font_small)
-            tw = bbox[2] - bbox[0]
-            th = bbox[3] - bbox[1]
-            draw.text(
-                (PADDING + (badge_w - tw) // 2, y_start + (ROW_HEIGHT - th) // 2),
-                win_text, fill=TEXT_WHITE, font=font_small
-            )
-
-            # ---------- 英雄头像 ----------
-            hero_x = PADDING + badge_w + 12
-            hero_y = y_start + (ROW_HEIGHT - HERO_IMG_SIZE) // 2
             hero_info = heroes.get(hero_id)
+            hero_name = hero_info['localized_name'] if hero_info else f"Hero {hero_id}"
+            hero_img = self._get_hero_img_data_url(hero_info['name']) if hero_info else ""
 
-            if hero_info:
-                hero_img = self._load_hero_image(hero_info['name'])
-                if hero_img:
-                    # 裁剪为更方正的比例
-                    w, h = hero_img.size
-                    if w > h:
-                        left = (w - h) // 2
-                        hero_img = hero_img.crop((left, 0, left + h, h))
-                    hero_img = hero_img.resize((HERO_IMG_SIZE, HERO_IMG_SIZE), PILImage.LANCZOS)
-                    # 粘贴到画布
-                    img.paste(hero_img, (hero_x, hero_y), hero_img)
-
-            # 英雄等级（左下角小数字）
-            if hero_level:
-                level_text = str(hero_level)
-                lbbox = draw.textbbox((0, 0), level_text, font=font_small)
-                lw = lbbox[2] - lbbox[0]
-                lh = lbbox[3] - lbbox[1]
-                lx = hero_x + HERO_IMG_SIZE - lw - 2
-                ly = hero_y + HERO_IMG_SIZE - lh - 4
-                # 背景圆
-                draw.ellipse([lx - 4, ly - 2, lx + lw + 4, ly + lh + 4], fill=(0, 0, 0, 200))
-                draw.text((lx, ly), level_text, fill=TEXT_GOLD, font=font_small)
-
-            # ---------- KDA 分数（大字） ----------
-            kda_x = hero_x + HERO_IMG_SIZE + 20
-            kda_text = str(kda_score)
-            draw.text((kda_x, y_start + 18), kda_text, fill=TEXT_WHITE, font=font_big)
-
-            # K / D / A 细节
-            kda_detail = f"{k} / {d} / {a}"
-            draw.text((kda_x, y_start + 58), kda_detail, fill=TEXT_GRAY, font=font_small)
-
-            # ---------- 英雄名 ----------
-            if hero_info:
-                hero_name_display = hero_info['localized_name']
-            else:
-                hero_name_display = f"Hero {hero_id}"
-            name_x = kda_x + 120
-            draw.text((name_x, y_start + 18), hero_name_display, fill=TEXT_WHITE, font=font_mid)
-
-            # ---------- 游戏模式和时长 ----------
-            draw.text((name_x, y_start + 42), lobby_str, fill=TEXT_GRAY, font=font_small)
-            draw.text((name_x, y_start + 62), duration_str, fill=TEXT_GRAY, font=font_small)
-
-            # ---------- GPM / XPM ----------
-            stat_x = CARD_WIDTH - PADDING - 120
-            draw.text((stat_x, y_start + 22), f"GPM {gpm}", fill=TEXT_GOLD, font=font_small)
-            draw.text((stat_x, y_start + 42), f"XPM {xpm}", fill=ASSIST_COLOR, font=font_small)
-
-        return img.convert("RGB")
+            result.append({
+                'is_win': is_win,
+                'hero_img': hero_img,
+                'hero_name': hero_name,
+                'hero_level': hero_level,
+                'kda_score': kda_score,
+                'kills': k,
+                'deaths': d,
+                'assists': a,
+                'lobby_str': LOBBY_TYPE_MAP.get(lobby_type, "其他模式"),
+                'duration_str': f"{duration // 60}:{duration % 60:02d}",
+                'gpm': gpm,
+                'xpm': xpm,
+            })
+        return result
 
     @filter.llm_tool(name="get_player_recent_matches")
     async def get_player_recent_matches(self, event: AstrMessageEvent, steamid: str, count: int = 1) -> MessageEventResult:
@@ -304,7 +270,6 @@ class MyPlugin(Star):
         count = min(count, 20)
         url = f"https://api.opendota.com/api/players/{steamid}/matches?lobby_type=7&limit={count}"
         try:
-            # 使用 asyncio.to_thread 避免阻塞事件循环
             def _fetch_data():
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                 with urllib.request.urlopen(req, timeout=15) as response:
@@ -325,15 +290,17 @@ class MyPlugin(Star):
             # 使用初始化时已缓存的英雄数据
             heroes = self._hero_cache or {}
 
-            # 渲染图片
-            result_img = await asyncio.to_thread(self._render_matches_image, matches, steamid, heroes)
+            # 预处理对局数据（含读取头像文件，放到线程中执行）
+            match_data = await asyncio.to_thread(self._prepare_match_data, matches, heroes)
 
-            # 保存到临时文件
-            tmp_path = os.path.join(tempfile.gettempdir(), f"dota2_matches_{steamid}.png")
-            result_img.save(tmp_path, "PNG")
+            # 使用 AstrBot 官方 HTML 文转图渲染
+            url = await self.html_render(
+                MATCHES_TMPL,
+                {"steamid": steamid, "matches": match_data},
+                options={"omit_background": True}
+            )
 
-            # 发送图片
-            yield event.image_result(tmp_path)
+            yield event.image_result(url)
 
         except Exception as e:
             logger.error(f"请求OpenDota API时发生错误: {str(e)}")
