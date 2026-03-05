@@ -36,41 +36,68 @@ KDA_RED = (240, 80, 80)
 KDA_BLUE = (120, 180, 255)
 DIVIDER_COLOR = (255, 255, 255, 26)
 
-# 字体 URL（Noto Sans SC，使用国内 GitHub 代理加速）
-FONT_URL = "https://ghfast.top/https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Bold.otf"
+# 字体下载源（多源备用，按顺序尝试）
+_GITHUB_RAW = "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese"
+_FONT_MIRRORS = [
+    f"https://ghfast.top/{_GITHUB_RAW}",
+    f"https://ghgo.xyz/{_GITHUB_RAW}",
+    _GITHUB_RAW,  # 直连 GitHub 作为最终备用
+]
 FONT_FILENAME = "NotoSansCJKsc-Bold.otf"
-FONT_URL_REGULAR = "https://ghfast.top/https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
 FONT_FILENAME_REGULAR = "NotoSansCJKsc-Regular.otf"
 
 
-def _ensure_font(data_dir: str, filename: str, url: str) -> str:
-    """确保字体文件存在于 data_dir 中，不存在则下载"""
-    path = os.path.join(data_dir, filename)
-    if os.path.exists(path):
-        return path
-    logger.info(f"首次运行，正在下载字体 {filename} ...")
+def _is_valid_otf(path: str) -> bool:
+    """检查文件是否为有效的 OTF/TTF 字体（校验文件头魔数）"""
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            with open(path, 'wb') as f:
-                f.write(resp.read())
-        logger.info(f"字体下载完成: {path}")
-    except Exception as e:
-        logger.error(f"字体下载失败: {e}")
-        raise RuntimeError(f"无法下载字体文件 {filename}，请确保网络可访问") from e
-    return path
+        with open(path, 'rb') as f:
+            header = f.read(4)
+        # OTF: 'OTTO', TTF: '\x00\x01\x00\x00' 或 'true'
+        return header in (b'OTTO', b'\x00\x01\x00\x00', b'true')
+    except Exception:
+        return False
+
+
+def _ensure_font(data_dir: str, filename: str) -> str:
+    """确保字体文件存在于 data_dir 中，不存在或损坏则从多个源下载"""
+    path = os.path.join(data_dir, filename)
+    if os.path.exists(path) and _is_valid_otf(path):
+        return path
+    # 已存在但损坏，删除后重新下载
+    if os.path.exists(path):
+        logger.warning(f"字体文件损坏，将重新下载: {filename}")
+        os.remove(path)
+    for mirror in _FONT_MIRRORS:
+        url = f"{mirror}/{filename}"
+        logger.info(f"正在下载字体 {filename} from {mirror} ...")
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                with open(path, 'wb') as f:
+                    f.write(resp.read())
+            if _is_valid_otf(path):
+                logger.info(f"字体下载完成: {path}")
+                return path
+            else:
+                logger.warning(f"从 {mirror} 下载的文件不是有效字体，尝试下一个源")
+                os.remove(path)
+        except Exception as e:
+            logger.warning(f"从 {mirror} 下载失败: {e}")
+            if os.path.exists(path):
+                os.remove(path)
+    raise RuntimeError(f"所有下载源均失败，无法获取字体 {filename}")
 
 
 def ensure_fonts(data_dir: str):
     """预下载所有需要的字体文件（供插件初始化时调用）"""
-    _ensure_font(data_dir, FONT_FILENAME, FONT_URL)
-    _ensure_font(data_dir, FONT_FILENAME_REGULAR, FONT_URL_REGULAR)
+    _ensure_font(data_dir, FONT_FILENAME)
+    _ensure_font(data_dir, FONT_FILENAME_REGULAR)
 
 
 def _load_fonts(data_dir: str):
     """加载 Bold 和 Regular 字体，返回各种尺寸的 ImageFont"""
-    bold_path = _ensure_font(data_dir, FONT_FILENAME, FONT_URL)
-    regular_path = _ensure_font(data_dir, FONT_FILENAME_REGULAR, FONT_URL_REGULAR)
+    bold_path = _ensure_font(data_dir, FONT_FILENAME)
+    regular_path = _ensure_font(data_dir, FONT_FILENAME_REGULAR)
 
     return {
         'title': ImageFont.truetype(bold_path, 18 * SCALE),
