@@ -125,7 +125,7 @@ class MyPlugin(Star):
 
     @filter.llm_tool(name="bind_steam_id")
     async def bind_steam_id(self, event: AstrMessageEvent, steamid: str) -> MessageEventResult:
-        '''绑定当前用户的QQ号与DOTA2 Steam ID，绑定后可直接查询自己的对局数据无需再输入Steam ID。
+        '''绑定发送消息的QQ号与Steam ID，绑定后可直接查询自己的对局数据无需再输入Steam ID。
 
         Args:
             steamid(string): 要绑定的Steam ID（支持Steam32或Steam64格式）
@@ -176,7 +176,7 @@ class MyPlugin(Star):
 
     @filter.llm_tool(name="get_player_recent_matches")
     async def get_player_recent_matches(self, event: AstrMessageEvent, steamid: str = "", count: int = 1) -> MessageEventResult:
-        '''获取指定玩家最近几盘DOTA2对局数据。如果用户没有提供steamid，会自动根据用户的QQ号或被@的人的QQ号查找已绑定的Steam ID。
+        '''获取指定玩家最近几盘DOTA2对局数据。如果用户没有提供steamid，会自动根据发送消息的QQ号或被@的人的QQ号查找已绑定的Steam ID。
         
         Args:
             steamid(string): 玩家的Steam ID（可选，未提供时自动从QQ绑定中查找）
