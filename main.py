@@ -5,7 +5,7 @@ import urllib.request
 import json
 import os
 import asyncio
-from .render import render_matches_card
+from .render import render_matches_card, ensure_fonts
 
 
 
@@ -23,6 +23,8 @@ class MyPlugin(Star):
         os.makedirs(self._hero_img_dir, exist_ok=True)
         self._bindings = self._load_bindings()
         logger.info(f"QQ-Steam 绑定数据已加载，共 {len(self._bindings)} 条记录")
+        logger.info("正在预下载字体文件...")
+        await asyncio.to_thread(ensure_fonts, self._hero_img_dir)
         logger.info("正在初始化英雄数据缓存...")
         await asyncio.to_thread(self._fetch_heroes)
         if self._hero_cache:

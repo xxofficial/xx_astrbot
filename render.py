@@ -57,8 +57,14 @@ def _ensure_font(data_dir: str, filename: str, url: str) -> str:
         logger.info(f"字体下载完成: {path}")
     except Exception as e:
         logger.error(f"字体下载失败: {e}")
-        raise RuntimeError(f"无法下载字体文件 {filename}，请确保网络可访问 GitHub") from e
+        raise RuntimeError(f"无法下载字体文件 {filename}，请确保网络可访问") from e
     return path
+
+
+def ensure_fonts(data_dir: str):
+    """预下载所有需要的字体文件（供插件初始化时调用）"""
+    _ensure_font(data_dir, FONT_FILENAME, FONT_URL)
+    _ensure_font(data_dir, FONT_FILENAME_REGULAR, FONT_URL_REGULAR)
 
 
 def _load_fonts(data_dir: str):
