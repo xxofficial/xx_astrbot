@@ -15,10 +15,14 @@ class MyPlugin(Star):
         super().__init__(context)
         self._hero_cache = None  # hero_id -> {name, localized_name}
         self._hero_img_dir = StarTools.get_data_dir("astrbot_plugin_xx_bot")
+        self._bindings_file = os.path.join(self._hero_img_dir, "qq_steam_bindings.json")
+        self._bindings = {}  # qq_id(str) -> steam32_id(str)
 
     async def initialize(self):
         """插件初始化：预加载英雄数据和头像缓存"""
         os.makedirs(self._hero_img_dir, exist_ok=True)
+        self._bindings = self._load_bindings()
+        logger.info(f"QQ-Steam 绑定数据已加载，共 {len(self._bindings)} 条记录")
         logger.info("正在初始化英雄数据缓存...")
         await asyncio.to_thread(self._fetch_heroes)
         if self._hero_cache:
@@ -75,6 +79,68 @@ class MyPlugin(Star):
             return False
 
 
+    # ====== QQ-Steam 绑定 ======
+
+    def _load_bindings(self) -> dict:
+        """从 JSON 文件加载 QQ→Steam 绑定"""
+        if os.path.exists(self._bindings_file):
+            try:
+                with open(self._bindings_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"加载绑定数据失败: {e}")
+        return {}
+
+    def _save_bindings(self):
+        """保存 QQ→Steam 绑定到 JSON 文件"""
+        try:
+            with open(self._bindings_file, 'w', encoding='utf-8') as f:
+                json.dump(self._bindings, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存绑定数据失败: {e}")
+
+    def _normalize_steam_id(self, steamid: str) -> str:
+        """将 Steam64 ID 转换为 Steam32 ID"""
+        STEAM64_BASE = 76561197960265728
+        steam_id_int = int(steamid)
+        if steam_id_int >= STEAM64_BASE:
+            steam_id_int -= STEAM64_BASE
+        return str(steam_id_int)
+
+    def _resolve_steamid(self, event: AstrMessageEvent, steamid: str) -> str:
+        """解析 Steam ID：优先使用传入值，否则尝试从 QQ 映射获取"""
+        if steamid:
+            return steamid
+        # 检查消息中是否有 @某人
+        msg_chain = event.message_obj.message
+        for comp in msg_chain:
+            if hasattr(comp, 'qq') and str(comp.qq) != str(event.message_obj.self_id):
+                target_qq = str(comp.qq)
+                if target_qq in self._bindings:
+                    return self._bindings[target_qq]
+                return ""  # 被@的人未绑定
+        # 使用发送者自己的 QQ
+        sender_qq = str(event.get_sender_id())
+        return self._bindings.get(sender_qq, "")
+
+    @filter.llm_tool(name="bind_steam_id")
+    async def bind_steam_id(self, event: AstrMessageEvent, steamid: str) -> MessageEventResult:
+        '''绑定当前用户的QQ号与DOTA2 Steam ID，绑定后可直接查询自己的对局数据无需再输入Steam ID。
+
+        Args:
+            steamid(string): 要绑定的Steam ID（支持Steam32或Steam64格式）
+        '''
+        try:
+            normalized = self._normalize_steam_id(steamid)
+        except (ValueError, TypeError):
+            yield event.plain_result(f"无效的 Steam ID: {steamid}")
+            return
+
+        sender_qq = str(event.get_sender_id())
+        self._bindings[sender_qq] = normalized
+        self._save_bindings()
+        logger.info(f"QQ {sender_qq} 绑定 Steam ID {normalized}")
+        yield event.plain_result(f"绑定成功！QQ {sender_qq} → Steam ID {normalized}")
 
     def _prepare_match_data(self, matches: list, heroes: dict) -> list:
         """预处理对局数据"""
@@ -109,21 +175,23 @@ class MyPlugin(Star):
         return result
 
     @filter.llm_tool(name="get_player_recent_matches")
-    async def get_player_recent_matches(self, event: AstrMessageEvent, steamid: str, count: int = 1) -> MessageEventResult:
-        '''获取指定steamid的玩家最近几盘DOTA2对局数据。
+    async def get_player_recent_matches(self, event: AstrMessageEvent, steamid: str = "", count: int = 1) -> MessageEventResult:
+        '''获取指定玩家最近几盘DOTA2对局数据。如果用户没有提供steamid，会自动根据用户的QQ号或被@的人的QQ号查找已绑定的Steam ID。
         
         Args:
-            steamid(string): 玩家的Steam32 ID
+            steamid(string): 玩家的Steam ID（可选，未提供时自动从QQ绑定中查找）
             count(int): 要查询的最近对局盘数，默认1盘
         '''
-        # 如果输入的是Steam64 ID，转换为Steam32 ID
-        STEAM64_BASE = 76561197960265728
+        # 解析 Steam ID：传入值 > @某人的绑定 > 发送者自己的绑定
+        steamid = self._resolve_steamid(event, steamid)
+        if not steamid:
+            yield event.plain_result("未找到绑定的 Steam ID。请先使用绑定功能将你的QQ号与Steam ID关联。")
+            return
+
+        # Steam64 → Steam32 转换
         try:
-            steam_id_int = int(steamid)
-            if steam_id_int >= STEAM64_BASE:
-                steam_id_int -= STEAM64_BASE
-            steamid = str(steam_id_int)
-        except ValueError:
+            steamid = self._normalize_steam_id(steamid)
+        except (ValueError, TypeError):
             yield event.plain_result(f"无效的Steam ID: {steamid}")
             return
 
