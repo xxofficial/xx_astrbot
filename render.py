@@ -36,10 +36,10 @@ KDA_RED = (240, 80, 80)
 KDA_BLUE = (120, 180, 255)
 DIVIDER_COLOR = (255, 255, 255, 26)
 
-# 字体 URL（Noto Sans SC，Google Fonts 镜像）
-FONT_URL = "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Bold.otf"
+# 字体 URL（Noto Sans SC，使用国内 GitHub 代理加速）
+FONT_URL = "https://ghfast.top/https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Bold.otf"
 FONT_FILENAME = "NotoSansCJKsc-Bold.otf"
-FONT_URL_REGULAR = "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
+FONT_URL_REGULAR = "https://ghfast.top/https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
 FONT_FILENAME_REGULAR = "NotoSansCJKsc-Regular.otf"
 
 
