@@ -5,96 +5,9 @@ import urllib.request
 import json
 import os
 import asyncio
-import base64
+from .render import render_matches_card
 
-# Lobby type 映射
 
-# HTML + Jinja2 模板
-MATCHES_TMPL = '''
-<div style="
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-    padding: 24px;
-    min-width: 680px;
-    max-width: 720px;
-">
-    <!-- 标题 -->
-    <div style="
-        color: #e0e0e0;
-        font-size: 18px;
-        font-weight: 600;
-        margin-bottom: 16px;
-        padding-bottom: 12px;
-        border-bottom: 1px solid rgba(255,255,255,0.1);
-    ">
-        SteamID {{ steamid }} 的最近 {{ matches|length }} 场天梯对局
-    </div>
-
-    {% for m in matches %}
-    <div style="
-        display: flex;
-        align-items: center;
-        background: {{ 'rgba(40, 75, 50, 0.85)' if m.is_win else 'rgba(80, 35, 35, 0.85)' }};
-        border-radius: 10px;
-        margin-bottom: 8px;
-        overflow: hidden;
-        height: 88px;
-        border-left: 4px solid {{ '#3caa5a' if m.is_win else '#d44' }};
-    ">
-        <!-- 胜负标记 -->
-        <div style="
-            width: 52px;
-            min-width: 52px;
-            height: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: {{ 'rgba(60, 170, 90, 0.6)' if m.is_win else 'rgba(200, 60, 60, 0.6)' }};
-            color: white;
-            font-size: 13px;
-            font-weight: 700;
-        ">{{ '胜利' if m.is_win else '失败' }}</div>
-
-        <!-- 英雄头像 -->
-        <div style="
-            width: 60px;
-            height: 60px;
-            margin: 0 12px;
-            border-radius: 8px;
-            overflow: hidden;
-            flex-shrink: 0;
-            position: relative;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-        ">
-            {% if m.hero_img %}
-            <img src="{{ m.hero_img }}" style="width: 100%; height: 100%; object-fit: cover;" />
-            {% else %}
-            <div style="width:100%;height:100%;background:#333;display:flex;align-items:center;justify-content:center;color:#888;font-size:11px;">N/A</div>
-            {% endif %}
-        </div>
-
-        <!-- KDA 分数 -->
-        <div style="min-width: 90px; text-align: center;">
-            <div style="color: #f0f0f0; font-size: 28px; font-weight: 700; line-height: 1.1;">{{ m.kda_score }}</div>
-            <div style="color: #a0a0a8; font-size: 12px; margin-top: 4px;">
-                <span style="color: #64dc78;">{{ m.kills }}</span>
-                <span style="color: #888;"> / </span>
-                <span style="color: #f05050;">{{ m.deaths }}</span>
-                <span style="color: #888;"> / </span>
-                <span style="color: #78b4ff;">{{ m.assists }}</span>
-            </div>
-        </div>
-
-        <!-- 英雄名 + 模式 + 时长 -->
-        <div style="flex: 1; padding: 0 12px; min-width: 0;">
-            <div style="color: #f0f0f0; font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ m.hero_name }}</div>
-            <div style="color: #a0a0a8; font-size: 12px; margin-top: 4px;">{{ m.lobby_str }}</div>
-            <div style="color: #a0a0a8; font-size: 12px; margin-top: 2px;">{{ m.duration_str }}</div>
-        </div>
-    </div>
-    {% endfor %}
-</div>
-'''
 
 @register("xx_bot", "XX", "自用插件", "1.0.0")
 class MyPlugin(Star):
@@ -161,23 +74,10 @@ class MyPlugin(Star):
             logger.error(f"下载英雄头像失败 ({hero_name}): {e}")
             return False
 
-    def _get_hero_img_data_url(self, hero_name: str) -> str:
-        """获取英雄头像的 data URL（用于 HTML 内嵌图片）"""
-        local_path = os.path.join(self._hero_img_dir, f"{hero_name}.png")
-        if not os.path.exists(local_path):
-            if not self._download_hero_image(hero_name):
-                return ""
-        try:
-            with open(local_path, 'rb') as f:
-                img_data = f.read()
-            b64 = base64.b64encode(img_data).decode('ascii')
-            return f"data:image/png;base64,{b64}"
-        except Exception as e:
-            logger.error(f"读取英雄头像失败 ({hero_name}): {e}")
-            return ""
+
 
     def _prepare_match_data(self, matches: list, heroes: dict) -> list:
-        """预处理对局数据，供 Jinja2 模板使用"""
+        """预处理对局数据"""
         result = []
         for m in matches:
             hero_id = m.get('hero_id', 0)
@@ -193,11 +93,11 @@ class MyPlugin(Star):
 
             hero_info = heroes.get(hero_id)
             hero_name = hero_info['localized_name'] if hero_info else f"Hero {hero_id}"
-            hero_img = self._get_hero_img_data_url(hero_info['name']) if hero_info else ""
+            hero_img_path = os.path.join(self._hero_img_dir, f"{hero_info['name']}.png") if hero_info else ""
 
             result.append({
                 'is_win': is_win,
-                'hero_img': hero_img,
+                'hero_img_path': hero_img_path,
                 'hero_name': hero_name,
                 'kda_score': kda_score,
                 'kills': k,
@@ -250,24 +150,16 @@ class MyPlugin(Star):
             # 使用初始化时已缓存的英雄数据
             heroes = self._hero_cache or {}
 
-            # 预处理对局数据（含读取头像文件，放到线程中执行）
+            # 预处理对局数据
             match_data = await asyncio.to_thread(self._prepare_match_data, matches, heroes)
 
-            # 使用 AstrBot 官方 HTML 文转图渲染
-            url = await self.html_render(
-                MATCHES_TMPL,
-                {"steamid": steamid, "matches": match_data},
-                options={
-					"quality": 100,
-					"timeout": 45000,
-					"device_scale_factor_level": "ultra",
-					"full_page": False,
-					"omit_background": True,
-					"type": "png"
-				}
+            # 使用 Pillow 高清渲染
+            img_path = await asyncio.to_thread(
+                render_matches_card, steamid, match_data,
+                self._hero_img_dir, self._hero_img_dir
             )
 
-            yield event.image_result(url)
+            yield event.image_result(img_path)
 
         except Exception as e:
             logger.error(f"请求OpenDota API时发生错误: {str(e)}")
