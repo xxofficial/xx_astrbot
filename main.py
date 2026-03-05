@@ -125,10 +125,10 @@ class MyPlugin(Star):
 
     @filter.llm_tool(name="bind_steam_id")
     async def bind_steam_id(self, event: AstrMessageEvent, steamid: str) -> MessageEventResult:
-        '''绑定发送消息的QQ号与Steam ID，绑定后可直接查询自己的对局数据无需再输入Steam ID。
+        '''记录用户的DOTA2 Steam ID。只需提供Steam ID即可完成绑定，无需其他信息。绑定后用户查询对局数据时将自动使用该Steam ID。
 
         Args:
-            steamid(string): 要绑定的Steam ID（支持Steam32或Steam64格式）
+            steamid(string): 用户提供的Steam ID（支持Steam32或Steam64格式）
         '''
         try:
             normalized = self._normalize_steam_id(steamid)
