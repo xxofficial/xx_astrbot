@@ -4,6 +4,7 @@ Pillow 高清对局卡片渲染模块
 """
 import os
 import urllib.request
+import uuid
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from astrbot.api import logger
 
@@ -287,6 +288,7 @@ def render_matches_card(steamid: str, match_data: list, data_dir: str, img_dir: 
     img = img.convert('RGB')
 
     # 保存输出
-    out_path = os.path.join(data_dir, "matches_card.png")
+    file_name = f"matches_card_{steamid}_{uuid.uuid4().hex[:8]}.png"
+    out_path = os.path.join(data_dir, file_name)
     img.save(out_path, "PNG", quality=100)
     return out_path

@@ -1,10 +1,11 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+﻿from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 import urllib.request
 import json
 import os
 import asyncio
+import glob
 from .render import render_matches_card, ensure_fonts
 
 
@@ -21,6 +22,13 @@ class MyPlugin(Star):
     async def initialize(self):
         """插件初始化：预加载英雄数据和头像缓存"""
         os.makedirs(self._hero_img_dir, exist_ok=True)
+        # 清理之前可能遗留的临时卡片图片
+        for old_img in glob.glob(os.path.join(self._hero_img_dir, "matches_card_*.png")):
+            try:
+                os.remove(old_img)
+            except Exception:
+                pass
+
         self._bindings = self._load_bindings()
         logger.info(f"QQ-Steam 绑定数据已加载，共 {len(self._bindings)} 条记录")
         logger.info("正在预下载字体文件...")
@@ -230,6 +238,18 @@ class MyPlugin(Star):
             )
 
             yield event.image_result(img_path)
+
+            # 启动后台任务：延迟 60 秒后删除生成的图片文件
+            async def _delayed_delete_image(path: str, delay: int = 60):
+                await asyncio.sleep(delay)
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                        logger.info(f"已清理临时图片: {path}")
+                except Exception as e:
+                    logger.error(f"清理临时图片失败: {e}")
+            
+            asyncio.create_task(_delayed_delete_image(img_path))
 
         except Exception as e:
             logger.error(f"请求OpenDota API时发生错误: {str(e)}")
