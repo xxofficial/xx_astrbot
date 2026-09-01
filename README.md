@@ -1,14 +1,44 @@
-# astrbot-plugin-helloworld
+# B站动态订阅插件
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+AstrBot 插件，用于订阅多个 B站账号的公开动态和投稿视频。插件每 5 分钟检查一次更新，首次订阅只建立当前基线，不会补发旧内容。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+## 蓝色图片卡片
 
-# Supports
+新动态和投稿视频会优先渲染为蓝色主题图片卡片：包含 UP 主头像、发布时间、正文或视频标题，以及最多 9 张动态配图。视频使用 16:9 封面布局，图文动态会按图片数量自动切换网格。
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+模板位于 `templates/bilibili_card.html`，使用 AstrBot 自带的 HTML/Jinja2 图片渲染能力，不增加第三方依赖。若当前 AstrBot 环境暂时无法渲染，插件会自动回退为文字加原图推送，不影响订阅检查。
+
+## 命令
+
+- `订阅b站 [UID/空间链接] [全部/动态/视频]`
+- `取消订阅b站 [UID/空间链接] [全部/动态/视频]`
+- `查看b站订阅`
+
+UID 和类型都可以省略；省略 UID 时使用默认 UID `10082742`，省略类型时同时订阅动态和视频。
+
+示例：
+
+```text
+订阅b站 10082742 全部
+订阅b站 https://space.bilibili.com/10082742 视频
+取消订阅b站 10082742 动态
+查看b站订阅
+```
+
+旧命令 `订阅b站更新`、`取消订阅b站更新` 仍可使用，作用于默认 UID。
+
+## 无账号 Cookie 方案
+
+插件读取 B站公开空间动态桌面接口：
+
+```text
+GET https://api.bilibili.com/x/polymer/web-dynamic/desktop/v1/feed/space
+```
+
+请求只携带普通浏览器请求头，不发送、保存或配置 `SESSDATA`、`bili_jct` 等账号 Cookie。投稿视频在公开时间线中以 `DYNAMIC_TYPE_AV` 返回，插件将其与普通动态分流并分别推送。
+
+该接口是 B站网页使用的非正式公开接口，仍可能因 B站风控或接口调整而变化；轮询失败时插件会记录日志并在下一轮自动重试。
+
+## 数据迁移
+
+旧版 `bili_video_subscribe.json` 中的会话订阅会在首次启动时迁移到新版状态文件 `bili_subscriptions.json`，并升级为默认 UID 的动态和视频订阅。旧文件会保留，不会被删除。

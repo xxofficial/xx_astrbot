@@ -1,540 +1,642 @@
-﻿from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult, MessageChain
-from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 import astrbot.api.message_components as Comp
-import urllib.request
-import urllib.parse
+from astrbot.api.star import Context, Star, StarTools, register
+
+import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import os
-import asyncio
-import glob
-import hashlib
-import time
-from datetime import datetime
-from .render import render_matches_card, ensure_fonts
+from typing import Any
+
+from .bilibili import (
+    BiliUpdate,
+    BilibiliApiError,
+    BilibiliPublicClient,
+    normalize_bili_uid,
+)
+from .bili_card import build_bili_card_context, load_bili_card_template
 
 
-BILI_TARGET_UID = 10082742
+BILI_DEFAULT_UID = "10082742"
 BILI_POLL_INTERVAL_SECONDS = 300
-BILI_BUILTIN_SUBSCRIBERS = ["aiocqhttp:GroupMessage:617903838"]
-BILI_ARCHIVE_URL = "https://api.bilibili.com/x/space/wbi/arc/search"
-BILI_NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
-BILI_MIXIN_KEY_ENC_TAB = [
-    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
-    27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
-    37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
-    22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
-]
-BILI_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    "Referer": f"https://space.bilibili.com/{BILI_TARGET_UID}/video",
-    "Origin": "https://space.bilibili.com",
+BILI_MAX_SEEN_IDS = 200
+BILI_BUILTIN_SUBSCRIPTIONS = {
+    "aiocqhttp:GroupMessage:617903838": {
+        BILI_DEFAULT_UID: frozenset({"dynamic", "video"})
+    }
 }
 
+_TYPE_ALIASES = {
+    "全部": frozenset({"dynamic", "video"}),
+    "全": frozenset({"dynamic", "video"}),
+    "更新": frozenset({"dynamic", "video"}),
+    "all": frozenset({"dynamic", "video"}),
+    "动态": frozenset({"dynamic"}),
+    "dynamic": frozenset({"dynamic"}),
+    "视频": frozenset({"video"}),
+    "投稿": frozenset({"video"}),
+    "video": frozenset({"video"}),
+}
+_TYPE_ORDER = ("dynamic", "video")
+_TYPE_NAMES = {"dynamic": "动态", "video": "视频"}
+_BILI_TIMEZONE = timezone(timedelta(hours=8))
 
-@register("xx_bot", "XX", "自用插件", "1.0.0")
+
+@register("xx_bot", "XX", "B站账号动态与视频订阅推送", "2.1.0")
 class MyPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
-        self._hero_cache = None  # hero_id -> {name, localized_name}
-        self._hero_img_dir = StarTools.get_data_dir("astrbot_plugin_xx_bot")
-        self._bindings_file = os.path.join(self._hero_img_dir, "qq_steam_bindings.json")
-        self._bindings = {}  # qq_id(str) -> steam32_id(str)
-        self._bili_state_file = os.path.join(self._hero_img_dir, "bili_video_subscribe.json")
-        self._bili_state = {}
+        self._data_dir = StarTools.get_data_dir("astrbot_plugin_xx_bot")
+        self._bili_state_file = os.path.join(
+            self._data_dir, "bili_subscriptions.json"
+        )
+        self._legacy_bili_state_file = os.path.join(
+            self._data_dir, "bili_video_subscribe.json"
+        )
+        self._bili_state: dict[str, Any] = {}
         self._bili_poll_task = None
+        self._bili_check_lock = asyncio.Lock()
+        self._bili_client = BilibiliPublicClient()
 
     async def initialize(self):
-        """插件初始化：预加载英雄数据和头像缓存"""
-        os.makedirs(self._hero_img_dir, exist_ok=True)
-        # 清理之前可能遗留的临时卡片图片
-        for old_img in glob.glob(os.path.join(self._hero_img_dir, "matches_card_*.png")):
-            try:
-                os.remove(old_img)
-            except Exception:
-                pass
+        """Load subscriptions and start the public-feed polling worker."""
 
-        # DOTA/Steam 功能暂时停用，避免插件启动时加载旧功能状态。
-        # self._bindings = self._load_bindings()
+        os.makedirs(self._data_dir, exist_ok=True)
         self._bili_state = self._load_bili_state()
-        self._bili_poll_task = asyncio.create_task(self._bili_video_poll_loop())
-        logger.info("B站视频更新订阅任务已启动")
-        # logger.info(f"QQ-Steam 绑定数据已加载，共 {len(self._bindings)} 条记录")
-        # logger.info("正在预下载字体文件...")
-        # await asyncio.to_thread(ensure_fonts, self._hero_img_dir)
-        # logger.info("正在初始化英雄数据缓存...")
-        # await asyncio.to_thread(self._fetch_heroes)
-        # if self._hero_cache:
-        #     logger.info(f"英雄数据加载完成，共 {len(self._hero_cache)} 个英雄，开始预加载头像...")
-        #     await asyncio.to_thread(self._preload_hero_images)
-        #     cached_count = len([f for f in os.listdir(self._hero_img_dir) if f.endswith('.png')])
-        #     logger.info(f"英雄头像预加载完成，共缓存 {cached_count} 张头像")
-        # else:
-        #     logger.warning("英雄数据加载失败，头像将在运行时按需加载")
-
-    def _fetch_heroes(self):
-        """获取英雄数据并缓存"""
-        if self._hero_cache is not None:
-            return self._hero_cache
-        try:
-            req = urllib.request.Request(
-                "https://api.opendota.com/api/heroes",
-                headers={'User-Agent': 'Mozilla/5.0'}
-            )
-            with urllib.request.urlopen(req, timeout=10) as response:
-                heroes = json.loads(response.read().decode())
-            self._hero_cache = {}
-            for h in heroes:
-                short_name = h['name'].replace('npc_dota_hero_', '')
-                self._hero_cache[h['id']] = {
-                    'name': short_name,
-                    'localized_name': h['localized_name']
-                }
-            return self._hero_cache
-        except Exception as e:
-            logger.error(f"获取英雄数据失败: {e}")
-            return {}
-
-    def _preload_hero_images(self):
-        """预下载所有英雄头像到本地文件缓存（跳过已存在的）"""
-        for hero_id, info in self._hero_cache.items():
-            hero_name = info['name']
-            local_path = os.path.join(self._hero_img_dir, f"{hero_name}.png")
-            if not os.path.exists(local_path):
-                self._download_hero_image(hero_name)
-
-    def _download_hero_image(self, hero_name: str) -> bool:
-        """从 Steam CDN 下载英雄头像到本地文件"""
-        url = f"https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/{hero_name}.png"
-        local_path = os.path.join(self._hero_img_dir, f"{hero_name}.png")
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=10) as response:
-                with open(local_path, 'wb') as f:
-                    f.write(response.read())
-            return True
-        except Exception as e:
-            logger.error(f"下载英雄头像失败 ({hero_name}): {e}")
-            return False
-
-    # ====== B站视频更新订阅 ======
-
-    def _default_bili_state(self) -> dict:
-        return {
-            "subscribers": list(BILI_BUILTIN_SUBSCRIBERS),
-            "last_video": {},
-            "wbi_keys": {},
-        }
-
-    def _load_bili_state(self) -> dict:
-        """从 JSON 文件加载 B 站订阅状态"""
-        if os.path.exists(self._bili_state_file):
-            try:
-                with open(self._bili_state_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                state = self._default_bili_state()
-                state.update(data if isinstance(data, dict) else {})
-                state["subscribers"] = list(dict.fromkeys(
-                    [*BILI_BUILTIN_SUBSCRIBERS, *state.get("subscribers", [])]
-                ))
-                return state
-            except Exception as e:
-                logger.error(f"加载B站订阅状态失败: {e}")
-        return self._default_bili_state()
-
-    def _save_bili_state(self):
-        """保存 B 站订阅状态到 JSON 文件"""
-        try:
-            with open(self._bili_state_file, 'w', encoding='utf-8') as f:
-                json.dump(self._bili_state, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"保存B站订阅状态失败: {e}")
-
-    def _http_get_json(self, url: str, headers=None) -> dict:
-        req = urllib.request.Request(url, headers=headers or BILI_HEADERS)
-        with urllib.request.urlopen(req, timeout=15) as response:
-            return json.loads(response.read().decode('utf-8'))
-
-    def _get_bili_wbi_keys(self) -> tuple[str, str]:
-        cached = self._bili_state.get("wbi_keys") or {}
-        if (
-            cached.get("img_key")
-            and cached.get("sub_key")
-            and int(time.time()) - int(cached.get("updated_at", 0)) < 12 * 60 * 60
-        ):
-            return cached["img_key"], cached["sub_key"]
-
-        data = self._http_get_json(BILI_NAV_URL, BILI_HEADERS)
-        wbi_img = (data.get("data") or {}).get("wbi_img") or {}
-        img_url = wbi_img.get("img_url", "")
-        sub_url = wbi_img.get("sub_url", "")
-        if not img_url or not sub_url:
-            raise RuntimeError(f"获取B站WBI key失败: {data}")
-
-        img_key = os.path.basename(img_url).split(".")[0]
-        sub_key = os.path.basename(sub_url).split(".")[0]
-        self._bili_state["wbi_keys"] = {
-            "img_key": img_key,
-            "sub_key": sub_key,
-            "updated_at": int(time.time()),
-        }
         self._save_bili_state()
-        return img_key, sub_key
-
-    def _sign_bili_wbi_params(self, params: dict) -> dict:
-        img_key, sub_key = self._get_bili_wbi_keys()
-        raw_key = img_key + sub_key
-        mixin_key = "".join(raw_key[i] for i in BILI_MIXIN_KEY_ENC_TAB)[:32]
-
-        signed = {k: str(v) for k, v in params.items()}
-        signed["wts"] = str(int(time.time()))
-        sorted_params = dict(sorted(signed.items()))
-        clean_params = {
-            k: "".join(ch for ch in v if ch not in "!'()*")
-            for k, v in sorted_params.items()
-        }
-        query = urllib.parse.urlencode(clean_params)
-        signed["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
-        return signed
-
-    def _fetch_bili_latest_videos(self, limit: int = 5) -> list:
-        params = self._sign_bili_wbi_params({
-            "mid": BILI_TARGET_UID,
-            "order": "pubdate",
-            "ps": max(1, min(limit, 30)),
-            "pn": 1,
-            "web_location": 1550101,
-        })
-        url = f"{BILI_ARCHIVE_URL}?{urllib.parse.urlencode(params)}"
-        data = self._http_get_json(url, BILI_HEADERS)
-        if data.get("code") != 0:
-            # WBI key 偶尔会失效，清掉缓存后让下一轮重新获取。
-            self._bili_state["wbi_keys"] = {}
-            self._save_bili_state()
-            raise RuntimeError(f"B站投稿列表获取失败: {data}")
-
-        vlist = (((data.get("data") or {}).get("list") or {}).get("vlist") or [])
-        return sorted(vlist, key=lambda item: int(item.get("created") or 0), reverse=True)
-
-    def _format_bili_video_message(self, video: dict) -> str:
-        bvid = video.get("bvid") or ""
-        title = video.get("title") or "未命名视频"
-        author = video.get("author") or f"UID {BILI_TARGET_UID}"
-        created = int(video.get("created") or 0)
-        pub_time = datetime.fromtimestamp(created).strftime("%Y-%m-%d %H:%M") if created else "未知"
-        link = f"https://www.bilibili.com/video/{bvid}" if bvid else ""
-        return (
-            f"B站视频更新\n"
-            f"UP：{author}\n"
-            f"标题：{title}\n"
-            f"发布时间：{pub_time}\n"
-            f"{link}"
+        self._bili_poll_task = asyncio.create_task(self._bili_poll_loop())
+        logger.info(
+            "B站动态/视频订阅任务已启动（公开游客接口，不使用账号 Cookie）"
         )
 
-    def _normalize_bili_cover_url(self, video: dict) -> str:
-        cover_url = video.get("pic") or video.get("cover") or ""
-        if cover_url.startswith("//"):
-            cover_url = f"https:{cover_url}"
-        elif cover_url.startswith("http://"):
-            cover_url = f"https://{cover_url[len('http://'):]}"
-        return cover_url
-
-    def _is_new_bili_video(self, video: dict, last_video: dict) -> bool:
-        if not video or not last_video:
-            return False
-        created = int(video.get("created") or 0)
-        last_created = int(last_video.get("created") or 0)
-        bvid = video.get("bvid")
-        last_bvid = last_video.get("bvid")
-        return created > last_created or (created == last_created and bvid != last_bvid)
-
-    async def _send_bili_update(self, video: dict):
-        subscribers = self._bili_state.get("subscribers") or []
-        if not subscribers:
-            return
-
-        message = self._format_bili_video_message(video)
-        cover_url = self._normalize_bili_cover_url(video)
-        for umo in list(subscribers):
-            try:
-                chain = MessageChain([Comp.Plain(message)])
-                if cover_url:
-                    chain.append(Comp.Image.fromURL(cover_url))
-                await self.context.send_message(umo, chain)
-            except Exception as e:
-                logger.error(f"发送B站更新到 {umo} 失败: {e}")
-
-    async def _check_bili_video_update(self, notify: bool = True):
-        videos = await asyncio.to_thread(self._fetch_bili_latest_videos, 5)
-        if not videos:
-            logger.warning(f"B站 UID {BILI_TARGET_UID} 暂无投稿视频")
-            return
-
-        latest = videos[0]
-        last_video = self._bili_state.get("last_video") or {}
-        if not last_video:
-            self._bili_state["last_video"] = {
-                "bvid": latest.get("bvid"),
-                "created": int(latest.get("created") or 0),
-                "title": latest.get("title"),
-            }
-            self._save_bili_state()
-            logger.info(f"B站订阅已设置基线视频: {latest.get('bvid')} {latest.get('title')}")
-            return
-
-        new_videos = [video for video in videos if self._is_new_bili_video(video, last_video)]
-        if not new_videos:
-            return
-
-        for video in reversed(new_videos):
-            if notify:
-                await self._send_bili_update(video)
-
-        self._bili_state["last_video"] = {
-            "bvid": latest.get("bvid"),
-            "created": int(latest.get("created") or 0),
-            "title": latest.get("title"),
+    def _default_bili_state(self) -> dict[str, Any]:
+        return {
+            "version": 2,
+            "subscriptions": {},
+            "accounts": {},
         }
+
+    def _read_json_file(self, path: str) -> dict | None:
+        try:
+            with open(path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+            return data if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.error(f"加载B站订阅状态失败 ({path}): {exc}")
+            return None
+
+    def _normalize_stored_kinds(self, value: Any) -> list[str]:
+        if isinstance(value, str):
+            values = [value]
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            values = list(value)
+        else:
+            return []
+
+        result = []
+        for item in values:
+            kind = str(item).strip().lower()
+            if kind in _TYPE_NAMES and kind not in result:
+                result.append(kind)
+        return [kind for kind in _TYPE_ORDER if kind in result]
+
+    def _normalize_v2_state(self, raw: dict) -> dict[str, Any]:
+        state = self._default_bili_state()
+        subscriptions = raw.get("subscriptions")
+        if isinstance(subscriptions, dict):
+            for raw_umo, raw_targets in subscriptions.items():
+                if not isinstance(raw_targets, dict):
+                    continue
+                targets = {}
+                for raw_uid, raw_kinds in raw_targets.items():
+                    try:
+                        uid = normalize_bili_uid(raw_uid)
+                    except ValueError:
+                        continue
+                    kinds = self._normalize_stored_kinds(raw_kinds)
+                    if kinds:
+                        targets[uid] = kinds
+                if targets:
+                    state["subscriptions"][str(raw_umo)] = targets
+
+        accounts = raw.get("accounts")
+        if isinstance(accounts, dict):
+            for raw_uid, raw_account in accounts.items():
+                try:
+                    uid = normalize_bili_uid(raw_uid)
+                except ValueError:
+                    continue
+                if not isinstance(raw_account, dict):
+                    continue
+                state["accounts"][uid] = {
+                    "name": str(raw_account.get("name") or "").strip(),
+                    "initialized": bool(raw_account.get("initialized")),
+                    "seen_dynamic_ids": self._clean_seen_ids(
+                        raw_account.get("seen_dynamic_ids")
+                    ),
+                    "seen_video_ids": self._clean_seen_ids(
+                        raw_account.get("seen_video_ids")
+                    ),
+                    "last_checked_at": self._safe_int(
+                        raw_account.get("last_checked_at")
+                    ),
+                }
+        return state
+
+    def _safe_int(self, value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _migrate_legacy_state(self, raw: dict) -> dict[str, Any]:
+        state = self._default_bili_state()
+        subscribers = raw.get("subscribers")
+        if isinstance(subscribers, list):
+            for umo in subscribers:
+                if not umo:
+                    continue
+                state["subscriptions"][str(umo)] = {
+                    BILI_DEFAULT_UID: ["dynamic", "video"]
+                }
+        logger.info("已将旧版固定 UID 视频订阅迁移为动态+视频订阅")
+        return state
+
+    def _load_bili_state(self) -> dict[str, Any]:
+        state = None
+        if os.path.exists(self._bili_state_file):
+            raw = self._read_json_file(self._bili_state_file)
+            if raw is not None:
+                state = self._normalize_v2_state(raw)
+        elif os.path.exists(self._legacy_bili_state_file):
+            raw = self._read_json_file(self._legacy_bili_state_file)
+            if raw is not None:
+                state = self._migrate_legacy_state(raw)
+
+        if state is None:
+            state = self._default_bili_state()
+        self._merge_builtin_subscriptions(state)
+        return state
+
+    def _merge_builtin_subscriptions(self, state: dict[str, Any]) -> None:
+        subscriptions = state.setdefault("subscriptions", {})
+        for umo, targets in BILI_BUILTIN_SUBSCRIPTIONS.items():
+            saved_targets = subscriptions.setdefault(umo, {})
+            for uid, protected_kinds in targets.items():
+                current = set(self._normalize_stored_kinds(saved_targets.get(uid)))
+                current.update(protected_kinds)
+                saved_targets[uid] = self._ordered_kinds(current)
+
+    def _save_bili_state(self) -> None:
+        temp_path = f"{self._bili_state_file}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as file:
+                json.dump(
+                    self._bili_state,
+                    file,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            os.replace(temp_path, self._bili_state_file)
+        except Exception as exc:
+            logger.error(f"保存B站订阅状态失败: {exc}")
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+
+    def _clean_seen_ids(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        result = []
+        for item in value:
+            key = str(item or "").strip()
+            if key and key not in result:
+                result.append(key)
+            if len(result) >= BILI_MAX_SEEN_IDS:
+                break
+        return result
+
+    def _ordered_kinds(self, kinds: set[str] | frozenset[str]) -> list[str]:
+        return [kind for kind in _TYPE_ORDER if kind in kinds]
+
+    def _parse_kind_argument(self, value: Any) -> set[str]:
+        normalized = str(value or "全部").strip().lower()
+        kinds = _TYPE_ALIASES.get(normalized)
+        if kinds is None:
+            raise ValueError("订阅类型只支持：全部、动态、视频")
+        return set(kinds)
+
+    def _parse_command_target(
+        self, uid_value: Any, kind_value: Any
+    ) -> tuple[str, set[str]]:
+        raw_uid = str(uid_value or "").strip()
+        raw_kind = str(kind_value or "全部").strip()
+        if raw_uid.lower() in _TYPE_ALIASES and raw_kind in ("", "全部"):
+            raw_kind = raw_uid
+            raw_uid = BILI_DEFAULT_UID
+        uid = normalize_bili_uid(raw_uid or BILI_DEFAULT_UID)
+        return uid, self._parse_kind_argument(raw_kind)
+
+    def _account_state(self, uid: str) -> dict[str, Any]:
+        return self._bili_state.setdefault("accounts", {}).setdefault(
+            uid,
+            {
+                "name": "",
+                "initialized": False,
+                "seen_dynamic_ids": [],
+                "seen_video_ids": [],
+                "last_checked_at": 0,
+            },
+        )
+
+    def _subscribed_uids(self) -> list[str]:
+        uids = {
+            uid
+            for targets in self._bili_state.get("subscriptions", {}).values()
+            if isinstance(targets, dict)
+            for uid, kinds in targets.items()
+            if self._normalize_stored_kinds(kinds)
+        }
+        return sorted(uids, key=int)
+
+    def _recipients(self, uid: str, kind: str) -> list[str]:
+        result = []
+        for umo, targets in self._bili_state.get("subscriptions", {}).items():
+            if not isinstance(targets, dict):
+                continue
+            if kind in self._normalize_stored_kinds(targets.get(uid)):
+                result.append(umo)
+        return result
+
+    def _remember_ids(
+        self, current: list[str], previous: list[str]
+    ) -> list[str]:
+        result = []
+        for key in [*current, *previous]:
+            normalized = str(key or "").strip()
+            if normalized and normalized not in result:
+                result.append(normalized)
+            if len(result) >= BILI_MAX_SEEN_IDS:
+                break
+        return result
+
+    def _format_time(self, timestamp: int) -> str:
+        if not timestamp:
+            return "未知"
+        try:
+            return datetime.fromtimestamp(timestamp, _BILI_TIMEZONE).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        except (OSError, OverflowError, ValueError):
+            return "未知"
+
+    def _truncate(self, text: str, limit: int = 500) -> str:
+        value = str(text or "").strip()
+        return value if len(value) <= limit else f"{value[:limit]}……"
+
+    def _format_bili_message(self, update: BiliUpdate) -> str:
+        published = self._format_time(update.published_at)
+        if update.kind == "video":
+            return (
+                "B站视频更新\n"
+                f"UP：{update.author}\n"
+                f"标题：{update.title}\n"
+                f"发布时间：{published}\n"
+                f"{update.url}"
+            )
+
+        content = self._truncate(update.text) or update.title
+        return (
+            "B站动态更新\n"
+            f"UP：{update.author}\n"
+            f"内容：{content}\n"
+            f"发布时间：{published}\n"
+            f"{update.url}"
+        )
+
+    async def _render_bili_card(self, update: BiliUpdate) -> str:
+        try:
+            rendered = await self.html_render(
+                tmpl=load_bili_card_template(),
+                data=build_bili_card_context(
+                    update, self._format_time(update.published_at)
+                ),
+                return_url=False,
+                options={
+                    "full_page": True,
+                    "type": "png",
+                    "animations": "disabled",
+                    "caret": "hide",
+                    "scale": "device",
+                    "omit_background": True,
+                },
+            )
+            return str(rendered or "").strip()
+        except Exception as exc:
+            logger.warning(
+                f"渲染B站{_TYPE_NAMES[update.kind]}蓝色卡片失败，将回退为普通消息: {exc}"
+            )
+            return ""
+
+    def _bili_card_component(self, rendered: str):
+        if rendered.startswith(("http://", "https://")):
+            return Comp.Image.fromURL(rendered)
+        return Comp.Image.fromFileSystem(rendered)
+
+    async def _send_bili_update(self, uid: str, update: BiliUpdate) -> None:
+        recipients = self._recipients(uid, update.kind)
+        if not recipients:
+            return
+
+        message = self._format_bili_message(update)
+        rendered = await self._render_bili_card(update)
+        for umo in recipients:
+            try:
+                if rendered:
+                    chain = MessageChain(
+                        [
+                            self._bili_card_component(rendered),
+                            Comp.Plain(f"\n{update.url}"),
+                        ]
+                    )
+                else:
+                    chain = MessageChain([Comp.Plain(message)])
+                    for image_url in update.images:
+                        chain.append(Comp.Image.fromURL(image_url))
+                await self.context.send_message(umo, chain)
+            except Exception as exc:
+                logger.error(
+                    f"发送B站{_TYPE_NAMES[update.kind]}更新到 {umo} 失败: {exc}"
+                )
+
+    async def _refresh_bili_account(self, uid: str, notify: bool) -> None:
+        updates = await asyncio.to_thread(
+            self._bili_client.fetch_space_updates, uid
+        )
+        account = self._account_state(uid)
+        was_initialized = bool(account.get("initialized"))
+        previous_by_kind = {
+            "dynamic": self._clean_seen_ids(account.get("seen_dynamic_ids")),
+            "video": self._clean_seen_ids(account.get("seen_video_ids")),
+        }
+
+        if updates:
+            account["name"] = updates[0].author
+
+        if was_initialized and notify:
+            new_updates = [
+                update
+                for update in updates
+                if update.key not in previous_by_kind[update.kind]
+            ]
+            for update in reversed(new_updates):
+                await self._send_bili_update(uid, update)
+
+        for kind in _TYPE_ORDER:
+            current = [
+                update.key for update in updates if update.kind == kind
+            ]
+            state_key = f"seen_{kind}_ids"
+            account[state_key] = self._remember_ids(
+                current, previous_by_kind[kind]
+            )
+        account["initialized"] = True
+        account["last_checked_at"] = int(datetime.now().timestamp())
         self._save_bili_state()
 
-    async def _bili_video_poll_loop(self):
+    async def _bili_poll_loop(self) -> None:
         await asyncio.sleep(5)
         while True:
             try:
-                if self._bili_state.get("subscribers"):
-                    await self._check_bili_video_update(notify=True)
+                for uid in self._subscribed_uids():
+                    async with self._bili_check_lock:
+                        try:
+                            await self._refresh_bili_account(uid, notify=True)
+                        except BilibiliApiError as exc:
+                            logger.warning(f"检查B站 UID {uid} 更新失败: {exc}")
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            logger.error(f"检查B站 UID {uid} 更新异常: {exc}")
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
-                logger.error(f"B站视频更新检查失败: {e}")
+            except Exception as exc:
+                logger.error(f"B站订阅轮询任务异常: {exc}")
             await asyncio.sleep(BILI_POLL_INTERVAL_SECONDS)
 
-    @filter.command("订阅b站更新")
-    async def subscribe_bili_video_update(self, event: AstrMessageEvent):
-        """订阅 UID 10082742 的 B 站视频更新，更新会推送到当前会话。"""
-        umo = event.unified_msg_origin
-        subscribers = self._bili_state.setdefault("subscribers", [])
-        if umo not in subscribers:
-            subscribers.append(umo)
+    async def _subscribe(
+        self, umo: str, uid: str, requested_kinds: set[str]
+    ) -> str:
+        async with self._bili_check_lock:
+            targets = self._bili_state.setdefault("subscriptions", {}).setdefault(
+                umo, {}
+            )
+            current = set(self._normalize_stored_kinds(targets.get(uid)))
+            missing = requested_kinds - current
+            account = self._account_state(uid)
+            account_was_known = bool(
+                account.get("initialized") or account.get("name")
+            )
+            if not missing:
+                name = account.get("name") or f"UID {uid}"
+                return f"当前会话已订阅 {name} 的{self._kind_text(requested_kinds)}。"
+
+            refresh_error = None
+            try:
+                await self._refresh_bili_account(
+                    uid, notify=bool(account.get("initialized"))
+                )
+            except Exception as exc:
+                refresh_error = exc
+
+            account = self._account_state(uid)
+            if not account.get("name"):
+                try:
+                    account["name"] = await asyncio.to_thread(
+                        self._bili_client.fetch_account_name, uid
+                    )
+                except Exception as profile_exc:
+                    if refresh_error is None:
+                        refresh_error = profile_exc
+
+            if (
+                refresh_error is not None
+                and not account_was_known
+                and not account.get("name")
+            ):
+                if not current:
+                    targets.pop(uid, None)
+                if not targets:
+                    self._bili_state["subscriptions"].pop(umo, None)
+                if not self._uid_has_subscribers(uid):
+                    self._bili_state.get("accounts", {}).pop(uid, None)
+                self._save_bili_state()
+                return f"订阅失败：{refresh_error}"
+
+            current.update(requested_kinds)
+            targets[uid] = self._ordered_kinds(current)
             self._save_bili_state()
 
-        try:
-            await self._check_bili_video_update(notify=False)
-            latest = self._bili_state.get("last_video") or {}
-            title = latest.get("title") or "暂无基线视频"
-            yield event.plain_result(f"已订阅 UID {BILI_TARGET_UID} 的B站视频更新。当前基线：{title}")
-        except Exception as e:
-            logger.error(f"订阅B站更新时初始化基线失败: {e}")
-            yield event.plain_result(f"已订阅 UID {BILI_TARGET_UID} 的B站视频更新，但初始化基线失败：{e}")
+            name = account.get("name") or f"UID {uid}"
+            result = f"已订阅 {name}（UID {uid}）的{self._kind_text(requested_kinds)}。"
+            if refresh_error is not None:
+                result += " 当前基线初始化失败，将在后续轮询中自动重试。"
+            return result
 
-    @filter.command("取消订阅b站更新")
-    async def unsubscribe_bili_video_update(self, event: AstrMessageEvent):
-        """取消当前会话的 B 站视频更新订阅。"""
-        umo = event.unified_msg_origin
-        if umo in BILI_BUILTIN_SUBSCRIBERS:
-            yield event.plain_result(f"QQ群 617903838 是内置订阅目标，不能通过命令取消。")
-            return
-
-        subscribers = self._bili_state.setdefault("subscribers", [])
-        if umo in subscribers:
-            subscribers.remove(umo)
-            self._save_bili_state()
-            yield event.plain_result(f"已取消订阅 UID {BILI_TARGET_UID} 的B站视频更新。")
-        else:
-            yield event.plain_result("当前会话还没有订阅B站视频更新。")
-
-    @filter.command("查看b站订阅")
-    async def show_bili_video_subscription(self, event: AstrMessageEvent):
-        """查看当前 B 站视频更新订阅状态。"""
-        umo = event.unified_msg_origin
-        subscribers = self._bili_state.get("subscribers") or []
-        latest = self._bili_state.get("last_video") or {}
-        status = "已订阅" if umo in subscribers else "未订阅"
-        latest_title = latest.get("title") or "暂无"
-        yield event.plain_result(
-            f"当前会话：{status}\n"
-            f"订阅UID：{BILI_TARGET_UID}\n"
-            f"订阅会话数：{len(subscribers)}\n"
-            f"当前基线：{latest_title}"
+    def _protected_kinds(self, umo: str, uid: str) -> set[str]:
+        return set(
+            BILI_BUILTIN_SUBSCRIPTIONS.get(umo, {}).get(uid, frozenset())
         )
 
+    def _kind_text(self, kinds: set[str] | frozenset[str]) -> str:
+        return "和".join(
+            _TYPE_NAMES[kind] for kind in _TYPE_ORDER if kind in kinds
+        )
 
-    # ====== QQ-Steam 绑定 ======
+    def _uid_has_subscribers(self, uid: str) -> bool:
+        return any(
+            isinstance(targets, dict)
+            and bool(self._normalize_stored_kinds(targets.get(uid)))
+            for targets in self._bili_state.get("subscriptions", {}).values()
+        )
 
-    def _load_bindings(self) -> dict:
-        """从 JSON 文件加载 QQ→Steam 绑定"""
-        if os.path.exists(self._bindings_file):
-            try:
-                with open(self._bindings_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"加载绑定数据失败: {e}")
-        return {}
-
-    def _save_bindings(self):
-        """保存 QQ→Steam 绑定到 JSON 文件"""
-        try:
-            with open(self._bindings_file, 'w', encoding='utf-8') as f:
-                json.dump(self._bindings, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"保存绑定数据失败: {e}")
-
-    def _normalize_steam_id(self, steamid: str) -> str:
-        """将 Steam64 ID 转换为 Steam32 ID"""
-        STEAM64_BASE = 76561197960265728
-        steam_id_int = int(steamid)
-        if steam_id_int >= STEAM64_BASE:
-            steam_id_int -= STEAM64_BASE
-        return str(steam_id_int)
-
-    def _resolve_steamid(self, event: AstrMessageEvent, steamid: str) -> str:
-        """解析 Steam ID：优先使用传入值，否则尝试从 QQ 映射获取"""
-        if steamid:
-            return steamid
-        # 检查消息中是否有 @某人
-        msg_chain = event.message_obj.message
-        for comp in msg_chain:
-            if hasattr(comp, 'qq') and str(comp.qq) != str(event.message_obj.self_id):
-                target_qq = str(comp.qq)
-                if target_qq in self._bindings:
-                    return self._bindings[target_qq]
-                return ""  # 被@的人未绑定
-        # 使用发送者自己的 QQ
-        sender_qq = str(event.get_sender_id())
-        return self._bindings.get(sender_qq, "")
-
-    # @filter.llm_tool(name="bind_steam_id")
-    async def bind_steam_id(self, event: AstrMessageEvent, steamid: str) -> MessageEventResult:
-        '''记录用户的DOTA2 Steam ID。只需提供Steam ID即可完成绑定，无需其他信息。绑定后用户查询对局数据时将自动使用该Steam ID。
-
-        Args:
-            steamid(string): 用户提供的Steam ID（支持Steam32或Steam64格式）
-        '''
-        try:
-            normalized = self._normalize_steam_id(steamid)
-        except (ValueError, TypeError):
-            yield event.plain_result(f"无效的 Steam ID: {steamid}")
-            return
-
-        sender_qq = str(event.get_sender_id())
-        self._bindings[sender_qq] = normalized
-        self._save_bindings()
-        logger.info(f"QQ {sender_qq} 绑定 Steam ID {normalized}")
-        yield event.plain_result(f"绑定成功！QQ {sender_qq} → Steam ID {normalized}")
-
-    def _prepare_match_data(self, matches: list, heroes: dict) -> list:
-        """预处理对局数据"""
-        result = []
-        for m in matches:
-            hero_id = m.get('hero_id', 0)
-            k = m.get('kills', 0)
-            d = m.get('deaths', 0)
-            a = m.get('assists', 0)
-            duration = m.get('duration', 0)
-            player_slot = m.get('player_slot', 0)
-            radiant_win = m.get('radiant_win', True)
-
-            is_win = (player_slot < 128) == radiant_win
-            kda_score = round((k + a) / max(d, 1), 1)
-
-            hero_info = heroes.get(hero_id)
-            hero_name = hero_info['localized_name'] if hero_info else f"Hero {hero_id}"
-            hero_img_path = os.path.join(self._hero_img_dir, f"{hero_info['name']}.png") if hero_info else ""
-
-            result.append({
-                'is_win': is_win,
-                'hero_img_path': hero_img_path,
-                'hero_name': hero_name,
-                'kda_score': kda_score,
-                'kills': k,
-                'deaths': d,
-                'assists': a,
-                'lobby_str': "天梯模式",
-                'duration_str': f"{duration // 60}:{duration % 60:02d}",
-            })
-        return result
-
-    # @filter.llm_tool(name="get_player_recent_matches")
-    async def get_player_recent_matches(self, event: AstrMessageEvent, steamid: str = "", count: int = 1) -> MessageEventResult:
-        '''获取指定玩家最近几盘DOTA2对局数据。如果用户没有提供steamid，会自动根据发送消息的QQ号或被@的人的QQ号查找已绑定的Steam ID。
-
-        Args:
-            steamid(string): 玩家的Steam ID（可选，未提供时自动从QQ绑定中查找）
-            count(int): 要查询的最近对局盘数，默认1盘
-        '''
-        # 解析 Steam ID：传入值 > @某人的绑定 > 发送者自己的绑定
-        steamid = self._resolve_steamid(event, steamid)
-        if not steamid:
-            yield event.plain_result("未找到绑定的 Steam ID。请先使用绑定功能将你的QQ号与Steam ID关联。")
-            return
-
-        # Steam64 → Steam32 转换
-        try:
-            steamid = self._normalize_steam_id(steamid)
-        except (ValueError, TypeError):
-            yield event.plain_result(f"无效的Steam ID: {steamid}")
-            return
-
-        count = min(count, 20)
-        url = f"https://api.opendota.com/api/players/{steamid}/matches?lobby_type=7&limit={count}"
-        try:
-            def _fetch_data():
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=15) as response:
-                    return json.loads(response.read().decode())
-
-            data = await asyncio.to_thread(_fetch_data)
-
-            if not isinstance(data, list):
-                yield event.plain_result(f"获取失败，返回值: {data}")
-                return
-
-            if len(data) == 0:
-                yield event.plain_result("未找到该玩家的天梯对局记录。可能未公开比赛数据。")
-                return
-
-            matches = data
-
-            # 使用初始化时已缓存的英雄数据
-            heroes = self._hero_cache or {}
-
-            # 预处理对局数据
-            match_data = await asyncio.to_thread(self._prepare_match_data, matches, heroes)
-
-            # 使用 Pillow 高清渲染
-            img_path = await asyncio.to_thread(
-                render_matches_card, steamid, match_data,
-                self._hero_img_dir, self._hero_img_dir
+    async def _unsubscribe(
+        self, umo: str, uid: str, requested_kinds: set[str]
+    ) -> str:
+        async with self._bili_check_lock:
+            subscriptions = self._bili_state.setdefault("subscriptions", {})
+            targets = subscriptions.get(umo)
+            current = set(
+                self._normalize_stored_kinds(
+                    targets.get(uid) if isinstance(targets, dict) else None
+                )
             )
+            removable = (
+                current & requested_kinds
+            ) - self._protected_kinds(umo, uid)
+            if not removable:
+                if current & requested_kinds:
+                    return "这是内置订阅目标，对应订阅不能通过命令取消。"
+                return "当前会话没有对应的B站订阅。"
 
-            yield event.image_result(img_path)
+            remaining = current - removable
+            account_name = (
+                self._bili_state.get("accounts", {}).get(uid, {}).get("name")
+            )
+            if remaining:
+                targets[uid] = self._ordered_kinds(remaining)
+            else:
+                targets.pop(uid, None)
+                if not targets:
+                    subscriptions.pop(umo, None)
 
-            # 启动后台任务：延迟 60 秒后删除生成的图片文件
-            async def _delayed_delete_image(path: str, delay: int = 60):
-                await asyncio.sleep(delay)
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                        logger.info(f"已清理临时图片: {path}")
-                except Exception as e:
-                    logger.error(f"清理临时图片失败: {e}")
+            self._merge_builtin_subscriptions(self._bili_state)
+            if not self._uid_has_subscribers(uid):
+                self._bili_state.get("accounts", {}).pop(uid, None)
+            self._save_bili_state()
+            target_name = account_name or f"UID {uid}"
+            return f"已取消 {target_name} 的{self._kind_text(removable)}订阅。"
 
-            asyncio.create_task(_delayed_delete_image(img_path))
+    @filter.command("订阅b站")
+    async def subscribe_bili(
+        self,
+        event: AstrMessageEvent,
+        uid: str = "",
+        content_type: str = "全部",
+    ):
+        """订阅指定 UID；格式：订阅b站 [UID/空间链接] [全部/动态/视频]。"""
 
-        except Exception as e:
-            logger.error(f"请求OpenDota API时发生错误: {str(e)}")
-            yield event.plain_result(f"请求OpenDota API时发生错误: {str(e)}")
+        try:
+            normalized_uid, kinds = self._parse_command_target(uid, content_type)
+        except ValueError as exc:
+            yield event.plain_result(
+                f"参数错误：{exc}\n用法：订阅b站 [UID/空间链接] [全部/动态/视频]"
+            )
+            return
+        result = await self._subscribe(
+            event.unified_msg_origin, normalized_uid, kinds
+        )
+        yield event.plain_result(result)
+
+    @filter.command("取消订阅b站")
+    async def unsubscribe_bili(
+        self,
+        event: AstrMessageEvent,
+        uid: str = "",
+        content_type: str = "全部",
+    ):
+        """取消指定 UID；格式：取消订阅b站 [UID/空间链接] [全部/动态/视频]。"""
+
+        try:
+            normalized_uid, kinds = self._parse_command_target(uid, content_type)
+        except ValueError as exc:
+            yield event.plain_result(
+                f"参数错误：{exc}\n用法：取消订阅b站 [UID/空间链接] [全部/动态/视频]"
+            )
+            return
+        result = await self._unsubscribe(
+            event.unified_msg_origin, normalized_uid, kinds
+        )
+        yield event.plain_result(result)
+
+    @filter.command("订阅b站更新")
+    async def subscribe_bili_legacy(self, event: AstrMessageEvent):
+        """兼容旧命令：订阅默认 UID 的动态和视频。"""
+
+        result = await self._subscribe(
+            event.unified_msg_origin,
+            BILI_DEFAULT_UID,
+            {"dynamic", "video"},
+        )
+        yield event.plain_result(result)
+
+    @filter.command("取消订阅b站更新")
+    async def unsubscribe_bili_legacy(self, event: AstrMessageEvent):
+        """兼容旧命令：取消默认 UID 的动态和视频。"""
+
+        result = await self._unsubscribe(
+            event.unified_msg_origin,
+            BILI_DEFAULT_UID,
+            {"dynamic", "video"},
+        )
+        yield event.plain_result(result)
+
+    @filter.command("查看b站订阅")
+    async def show_bili_subscriptions(self, event: AstrMessageEvent):
+        """查看当前会话的全部 B站账号订阅。"""
+
+        targets = self._bili_state.get("subscriptions", {}).get(
+            event.unified_msg_origin, {}
+        )
+        if not isinstance(targets, dict) or not targets:
+            yield event.plain_result("当前会话没有B站订阅。")
+            return
+
+        lines = ["当前会话的B站订阅："]
+        for uid in sorted(targets, key=int):
+            kinds = set(self._normalize_stored_kinds(targets.get(uid)))
+            if not kinds:
+                continue
+            account = self._bili_state.get("accounts", {}).get(uid, {})
+            name = account.get("name") or f"UID {uid}"
+            lines.append(
+                f"- {name}（UID {uid}）：{self._kind_text(kinds)}"
+            )
+        lines.append(f"检查间隔：{BILI_POLL_INTERVAL_SECONDS // 60} 分钟")
+        lines.append("数据来源：B站公开游客接口，不使用账号 Cookie")
+        yield event.plain_result("\n".join(lines))
 
     async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+        """Stop the background worker when the plugin is unloaded."""
+
         if self._bili_poll_task:
             self._bili_poll_task.cancel()
             try:
                 await self._bili_poll_task
             except asyncio.CancelledError:
                 pass
+            except Exception as exc:
+                logger.error(f"停止B站订阅任务时发生异常: {exc}")
