@@ -1,4 +1,4 @@
-from astrbot.api import logger
+﻿from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 import astrbot.api.message_components as Comp
 from astrbot.api.star import Context, Star, StarTools, register
@@ -22,7 +22,7 @@ BILI_DEFAULT_UID = "10082742"
 BILI_POLL_INTERVAL_SECONDS = 300
 BILI_MAX_SEEN_IDS = 200
 BILI_BUILTIN_SUBSCRIPTIONS = {
-    "aiocqhttp:GroupMessage:617903838": {
+    "aiocqhttp:GroupMessage:498908616": {
         BILI_DEFAULT_UID: frozenset({"dynamic", "video"})
     }
 }
