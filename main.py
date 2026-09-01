@@ -14,6 +14,7 @@ from .bilibili import (
     BilibiliApiError,
     BilibiliPublicClient,
     normalize_bili_uid,
+    should_at_all_subscription_target,
 )
 from .bili_card import build_bili_card_context, load_bili_card_template
 
@@ -43,7 +44,7 @@ _TYPE_NAMES = {"dynamic": "动态", "video": "视频"}
 _BILI_TIMEZONE = timezone(timedelta(hours=8))
 
 
-@register("xx_bot", "XX", "B站账号动态与视频订阅推送", "2.1.0")
+@register("xx_bot", "XX", "B站账号动态与视频订阅推送", "2.3.0")
 class MyPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -346,28 +347,56 @@ class MyPlugin(Star):
             return Comp.Image.fromURL(rendered)
         return Comp.Image.fromFileSystem(rendered)
 
+    def _bili_update_components(
+        self, update: BiliUpdate, rendered: str
+    ) -> list[Any]:
+        if rendered:
+            return [
+                self._bili_card_component(rendered),
+                Comp.Plain(f"\n{update.url}"),
+            ]
+
+        components: list[Any] = [
+            Comp.Plain(self._format_bili_message(update))
+        ]
+        components.extend(
+            Comp.Image.fromURL(image_url) for image_url in update.images
+        )
+        return components
+
     async def _send_bili_update(self, uid: str, update: BiliUpdate) -> None:
         recipients = self._recipients(uid, update.kind)
         if not recipients:
             return
 
-        message = self._format_bili_message(update)
         rendered = await self._render_bili_card(update)
         for umo in recipients:
+            should_at_all = should_at_all_subscription_target(umo)
             try:
-                if rendered:
-                    chain = MessageChain(
-                        [
-                            self._bili_card_component(rendered),
-                            Comp.Plain(f"\n{update.url}"),
-                        ]
-                    )
-                else:
-                    chain = MessageChain([Comp.Plain(message)])
-                    for image_url in update.images:
-                        chain.append(Comp.Image.fromURL(image_url))
+                components = self._bili_update_components(update, rendered)
+                if should_at_all:
+                    components.insert(0, Comp.AtAll())
+                chain = MessageChain(components)
                 await self.context.send_message(umo, chain)
             except Exception as exc:
+                if should_at_all:
+                    logger.warning(
+                        f"发送B站{_TYPE_NAMES[update.kind]}更新到 {umo} 时"
+                        f" @全体成员失败，将重试普通推送: {exc}"
+                    )
+                    try:
+                        fallback_chain = MessageChain(
+                            self._bili_update_components(update, rendered)
+                        )
+                        await self.context.send_message(umo, fallback_chain)
+                        continue
+                    except Exception as fallback_exc:
+                        logger.error(
+                            f"发送B站{_TYPE_NAMES[update.kind]}更新到 {umo} "
+                            f"失败（@全体成员与普通推送均失败）: "
+                            f"{fallback_exc}"
+                        )
+                        continue
                 logger.error(
                     f"发送B站{_TYPE_NAMES[update.kind]}更新到 {umo} 失败: {exc}"
                 )
@@ -539,6 +568,67 @@ class MyPlugin(Star):
             self._save_bili_state()
             target_name = account_name or f"UID {uid}"
             return f"已取消 {target_name} 的{self._kind_text(removable)}订阅。"
+
+    async def _latest_bili_result(
+        self,
+        event: AstrMessageEvent,
+        uid_value: Any,
+        kind_value: Any,
+    ):
+        try:
+            uid, kinds = self._parse_command_target(uid_value, kind_value)
+        except ValueError as exc:
+            return event.plain_result(
+                f"参数错误：{exc}\n"
+                "用法：最新b站 [UID/空间链接] [全部/动态/视频]"
+            )
+
+        try:
+            update = await asyncio.to_thread(
+                self._bili_client.fetch_latest_update, uid, kinds
+            )
+        except BilibiliApiError as exc:
+            return event.plain_result(f"获取B站最新更新失败：{exc}")
+        except Exception as exc:
+            logger.error(f"获取B站 UID {uid} 最新更新异常: {exc}")
+            return event.plain_result("获取B站最新更新失败，请稍后重试。")
+
+        if update is None:
+            return event.plain_result(
+                f"没有找到 UID {uid} 的公开{self._kind_text(kinds)}。"
+            )
+
+        rendered = await self._render_bili_card(update)
+        return event.chain_result(
+            self._bili_update_components(update, rendered)
+        )
+
+    @filter.command("最新b站")
+    async def latest_bili(
+        self,
+        event: AstrMessageEvent,
+        uid: str = "",
+        content_type: str = "全部",
+    ):
+        """获取最新一条；格式：最新b站 [UID/空间链接] [全部/动态/视频]。"""
+
+        yield await self._latest_bili_result(event, uid, content_type)
+
+    @filter.command("最新b站动态")
+    async def latest_bili_dynamic(
+        self, event: AstrMessageEvent, uid: str = ""
+    ):
+        """获取指定 UID 最新一条公开动态。"""
+
+        yield await self._latest_bili_result(event, uid, "动态")
+
+    @filter.command("最新b站视频")
+    async def latest_bili_video(
+        self, event: AstrMessageEvent, uid: str = ""
+    ):
+        """获取指定 UID 最新一条投稿视频。"""
+
+        yield await self._latest_bili_result(event, uid, "视频")
 
     @filter.command("订阅b站")
     async def subscribe_bili(

@@ -6,6 +6,7 @@
   <style>
     :root {
       color-scheme: light;
+      --card-scale: 1;
       --blue-950: #163b6f;
       --blue-800: #2567bd;
       --blue-650: #3d8dea;
@@ -24,13 +25,15 @@
     html,
     body {
       margin: 0;
-      width: 808px;
+      width: 100%;
+      min-width: 808px;
       min-height: 1px;
       background: transparent;
     }
 
     body {
       padding: 24px;
+      overflow-x: clip;
       color: var(--blue-950);
       font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
       -webkit-font-smoothing: antialiased;
@@ -40,6 +43,7 @@
       position: relative;
       isolation: isolate;
       width: 760px;
+      zoom: var(--card-scale);
       overflow: hidden;
       padding: 26px;
       border: 1px solid rgba(125, 184, 243, 0.7);
@@ -49,6 +53,19 @@
         radial-gradient(circle at 3% 96%, rgba(134, 196, 255, 0.28) 0 10%, transparent 30%),
         linear-gradient(145deg, #f8fcff 0%, #e8f4ff 48%, #dceeff 100%);
       box-shadow: 0 22px 55px rgba(36, 102, 178, 0.2), 0 5px 14px rgba(36, 102, 178, 0.1);
+    }
+
+    /* Fallback for renderers that block inline scripts. */
+    @media (min-width: 1000px) {
+      :root {
+        --card-scale: 1.7;
+      }
+    }
+
+    @media (min-width: 1600px) {
+      :root {
+        --card-scale: 2.25;
+      }
     }
 
     .bubble,
@@ -441,5 +458,18 @@
       <span class="footer-link">{{ display_url | safe }}</span>
     </footer>
   </article>
+  <script>
+    (() => {
+      const root = document.documentElement;
+      const baseCardWidth = 760;
+      const canvasPadding = 48;
+      const canvasWidth = Math.max(root.clientWidth, 808);
+      const availableWidth = Math.max(baseCardWidth, canvasWidth - canvasPadding);
+      root.style.setProperty(
+        "--card-scale",
+        (availableWidth / baseCardWidth).toFixed(4)
+      );
+    })();
+  </script>
 </body>
 </html>

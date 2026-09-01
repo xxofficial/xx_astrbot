@@ -65,6 +65,9 @@ class BiliCardContextTests(unittest.TestCase):
         self.assertIn("{% if is_video %}", template)
         self.assertIn('class="gallery {{ gallery_class }}"', template)
         self.assertIn("B站订阅小助手", template)
+        self.assertIn("--card-scale", template)
+        self.assertIn("root.clientWidth", template)
+        self.assertIn("availableWidth / baseCardWidth", template)
 
 
 if __name__ == "__main__":

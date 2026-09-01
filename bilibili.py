@@ -52,6 +52,7 @@ class BiliUpdate:
     images: tuple[str, ...]
     raw_type: str
     avatar: str = ""
+    is_pinned: bool = False
 
 
 def normalize_bili_uid(value: Any) -> str:
@@ -66,6 +67,18 @@ def normalize_bili_uid(value: Any) -> str:
     if uid == "0":
         raise ValueError("UID 必须大于 0")
     return uid
+
+
+def should_at_all_subscription_target(value: Any) -> bool:
+    """Return whether a subscription target is an aiocqhttp QQ group."""
+
+    parts = str(value or "").split(":", 2)
+    return (
+        len(parts) == 3
+        and parts[0].casefold() == "aiocqhttp"
+        and parts[1].casefold() == "groupmessage"
+        and bool(parts[2].strip())
+    )
 
 
 def normalize_image_url(value: Any) -> str:
@@ -128,6 +141,13 @@ def _dynamic_text(item: dict) -> str:
 
     opus = _as_dict(dynamic.get("dyn_opus"))
     summary = _as_dict(opus.get("summary"))
+    text = summary.get("text")
+    if text:
+        return str(text).strip()
+
+    major = _as_dict(dynamic.get("major"))
+    opus = _as_dict(major.get("opus"))
+    summary = _as_dict(opus.get("summary"))
     return str(summary.get("text") or "").strip()
 
 
@@ -135,9 +155,11 @@ def _card_title(item: dict) -> str:
     dynamic = _find_module(item, "module_dynamic")
     major = _as_dict(dynamic.get("major"))
     candidates = [
+        dynamic.get("dyn_opus"),
         dynamic.get("dyn_article"),
         dynamic.get("dyn_common"),
         dynamic.get("dyn_ugc_season"),
+        major.get("opus"),
         major.get("article"),
         major.get("common"),
         major.get("ugc_season"),
@@ -168,6 +190,13 @@ def _collect_images(item: dict, archive: dict) -> tuple[str, ...]:
         for picture in draw.get("items") or []:
             if isinstance(picture, dict):
                 add(picture.get("src") or picture.get("url"))
+
+    opus_cards = [dynamic.get("dyn_opus"), major.get("opus")]
+    for opus_value in opus_cards:
+        opus = _as_dict(opus_value)
+        for picture in opus.get("pics") or []:
+            if isinstance(picture, dict):
+                add(picture.get("url") or picture.get("src"))
 
     article_cards = [dynamic.get("dyn_article"), major.get("article")]
     for article_value in article_cards:
@@ -223,6 +252,8 @@ def parse_space_item(item: Any, fallback_uid: str) -> BiliUpdate | None:
     avatar = normalize_image_url(
         author_user.get("face") or author_module.get("face")
     )
+    tag_module = _find_module(item, "module_tag")
+    is_pinned = str(tag_module.get("text") or "").strip() == "置顶"
     published_at = _as_int(author_module.get("pub_ts"))
 
     archive = _archive_from_item(item)
@@ -237,6 +268,7 @@ def parse_space_item(item: Any, fallback_uid: str) -> BiliUpdate | None:
         bvid = str(archive.get("bvid") or "").strip()
         key = bvid or dynamic_id
         title = str(archive.get("title") or "未命名视频").strip()
+        text = text or str(archive.get("desc") or "").strip()
         if bvid:
             url = f"https://www.bilibili.com/video/{bvid}"
     else:
@@ -254,7 +286,26 @@ def parse_space_item(item: Any, fallback_uid: str) -> BiliUpdate | None:
         images=_collect_images(item, archive),
         raw_type=raw_type,
         avatar=avatar,
+        is_pinned=is_pinned,
     )
+
+
+def select_latest_update(
+    updates: list[BiliUpdate], kinds: set[str] | frozenset[str]
+) -> BiliUpdate | None:
+    """Select the newest matching item by publish time, not feed position.
+
+    Space feeds can put an older pinned dynamic before newer items.  Keeping
+    the first item on equal timestamps preserves the API order as a fallback.
+    """
+
+    latest = None
+    for update in updates:
+        if update.kind not in kinds:
+            continue
+        if latest is None or update.published_at > latest.published_at:
+            latest = update
+    return latest
 
 
 class BilibiliPublicClient:
@@ -297,18 +348,18 @@ class BilibiliPublicClient:
             raise BilibiliApiError("B站接口返回格式异常")
         return data
 
-    def fetch_space_updates(self, uid: Any) -> list[BiliUpdate]:
-        """Fetch the first public space-feed page and split dynamics/videos."""
-
-        normalized_uid = normalize_bili_uid(uid)
-        params = urllib.parse.urlencode(
-            {
-                "host_mid": normalized_uid,
-                "timezone_offset": -480,
-                "platform": "web",
-                "features": _FEATURES,
-            }
-        )
+    def _fetch_space_page(
+        self, normalized_uid: str, offset: str = ""
+    ) -> tuple[list[BiliUpdate], str, bool]:
+        params_data = {
+            "host_mid": normalized_uid,
+            "timezone_offset": -480,
+            "platform": "web",
+            "features": _FEATURES,
+        }
+        if offset:
+            params_data["offset"] = offset
+        params = urllib.parse.urlencode(params_data)
         url = f"{BILI_DYNAMIC_SPACE_URL}?{params}"
         response = self._get_json(url, self._headers(normalized_uid, "dynamic"))
         if response.get("code") != 0:
@@ -317,7 +368,8 @@ class BilibiliPublicClient:
                 f"{response.get('message') or response.get('code')}"
             )
 
-        raw_items = _as_dict(response.get("data")).get("items") or []
+        response_data = _as_dict(response.get("data"))
+        raw_items = response_data.get("items") or []
         updates = [
             update
             for update in (
@@ -326,7 +378,61 @@ class BilibiliPublicClient:
             if update is not None
         ]
         updates.sort(key=lambda update: update.published_at, reverse=True)
+        next_offset = str(response_data.get("offset") or "").strip()
+        return updates, next_offset, bool(response_data.get("has_more"))
+
+    def fetch_space_updates(self, uid: Any) -> list[BiliUpdate]:
+        """Fetch the first public space-feed page and split dynamics/videos."""
+
+        normalized_uid = normalize_bili_uid(uid)
+        updates, _, _ = self._fetch_space_page(normalized_uid)
+        if not updates:
+            # The visitor endpoint occasionally returns a transient empty page
+            # with code=0. One immediate retry avoids corrupting a new baseline.
+            updates, _, _ = self._fetch_space_page(normalized_uid)
         return updates
+
+    def fetch_latest_update(
+        self,
+        uid: Any,
+        kinds: set[str] | frozenset[str],
+        max_pages: int = 5,
+    ) -> BiliUpdate | None:
+        """Find the latest requested kind, paging past pins or dense feeds."""
+
+        normalized_uid = normalize_bili_uid(uid)
+        collected: list[BiliUpdate] = []
+        offset = ""
+        seen_offsets: set[str] = set()
+        page_limit = max(1, min(int(max_pages), 10))
+
+        for page_index in range(page_limit):
+            page, next_offset, has_more = self._fetch_space_page(
+                normalized_uid, offset
+            )
+            if page_index == 0 and not page:
+                page, next_offset, has_more = self._fetch_space_page(
+                    normalized_uid, offset
+                )
+            collected.extend(page)
+
+            # Once a regular (non-pinned) matching item is found, later pages
+            # are older. Include pins in the timestamp comparison, however.
+            if any(
+                update.kind in kinds and not update.is_pinned
+                for update in page
+            ):
+                break
+            if (
+                not has_more
+                or not next_offset
+                or next_offset in seen_offsets
+            ):
+                break
+            seen_offsets.add(next_offset)
+            offset = next_offset
+
+        return select_latest_update(collected, kinds)
 
     def fetch_account_name(self, uid: Any) -> str:
         """Resolve a public account name without login credentials."""

@@ -1,6 +1,6 @@
 name: xx_bot
 display_name: B站动态订阅
-desc: 订阅多个B站账号的公开动态与投稿视频，以蓝色图片卡片推送，无需账号 Cookie。
-version: v2.1.0
+desc: 订阅多个B站账号的公开动态与投稿视频，以蓝色图片卡片推送，QQ 群自动艾特全体成员，无需账号 Cookie。
+version: v2.3.0
 author: XX
 repo: https://github.com/xxofficial/xx_astrbot
