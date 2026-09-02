@@ -44,7 +44,7 @@ _TYPE_NAMES = {"dynamic": "动态", "video": "视频"}
 _BILI_TIMEZONE = timezone(timedelta(hours=8))
 
 
-@register("xx_bot", "XX", "B站账号动态与视频订阅推送", "2.3.0")
+@register("xx_bot", "XX", "B站账号动态与视频订阅推送", "2.3.1")
 class MyPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -375,7 +375,11 @@ class MyPlugin(Star):
             try:
                 components = self._bili_update_components(update, rendered)
                 if should_at_all:
-                    components.insert(0, Comp.AtAll())
+                    # At(qq="all") works on older AstrBot releases too, while
+                    # AtAll was added later. OneBot serializes both as qq=all.
+                    components.insert(
+                        0, Comp.At(qq="all", name="全体成员")
+                    )
                 chain = MessageChain(components)
                 await self.context.send_message(umo, chain)
             except Exception as exc:

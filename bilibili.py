@@ -70,12 +70,16 @@ def normalize_bili_uid(value: Any) -> str:
 
 
 def should_at_all_subscription_target(value: Any) -> bool:
-    """Return whether a subscription target is an aiocqhttp QQ group."""
+    """Return whether a subscription target is a group-message UMO.
+
+    The first UMO field is a user-configurable platform instance ID, so it
+    must not be compared with an adapter name such as ``aiocqhttp``.
+    """
 
     parts = str(value or "").split(":", 2)
     return (
         len(parts) == 3
-        and parts[0].casefold() == "aiocqhttp"
+        and bool(parts[0].strip())
         and parts[1].casefold() == "groupmessage"
         and bool(parts[2].strip())
     )

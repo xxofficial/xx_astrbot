@@ -25,17 +25,20 @@ class NormalizeUidTests(unittest.TestCase):
 
 
 class SubscriptionTargetTests(unittest.TestCase):
-    def test_at_all_is_enabled_for_aiocqhttp_group(self):
-        self.assertTrue(
-            should_at_all_subscription_target(
-                "aiocqhttp:GroupMessage:498908616"
-            )
+    def test_at_all_is_enabled_for_any_group_platform_id(self):
+        targets = (
+            "aiocqhttp:GroupMessage:498908616",
+            "default:GroupMessage:498908616",
+            "my-qq-bot:groupmessage:bot_498908616",
         )
+        for target in targets:
+            with self.subTest(target=target):
+                self.assertTrue(should_at_all_subscription_target(target))
 
-    def test_at_all_is_disabled_for_private_or_other_platform_targets(self):
+    def test_at_all_is_disabled_for_private_or_malformed_targets(self):
         targets = (
             "aiocqhttp:PrivateMessage:123456",
-            "other:GroupMessage:498908616",
+            ":GroupMessage:498908616",
             "aiocqhttp:GroupMessage:",
             "invalid",
             None,
