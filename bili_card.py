@@ -61,6 +61,47 @@ def load_bili_card_template() -> str:
     return _TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
+def trim_transparent_padding(value: Any) -> str:
+    """Crop transparent screenshot margins while preserving visible shadows.
+
+    AstrBot's full-page renderer never produces an image shorter than its
+    viewport, so compact cards can have a large transparent area underneath.
+    Pillow is already provided by AstrBot; if it or a usable local PNG is not
+    available, returning the original value keeps rendering non-fatal.
+    """
+
+    rendered = str(value or "").strip()
+    if not rendered or rendered.startswith(("http://", "https://")):
+        return rendered
+
+    path = Path(rendered)
+    if not path.is_file():
+        return rendered
+
+    try:
+        from PIL import Image
+
+        with Image.open(path) as source:
+            if source.format != "PNG":
+                return rendered
+            rgba = source.convert("RGBA")
+            bounds = rgba.getchannel("A").getbbox()
+            if bounds is None or bounds == (0, 0, *rgba.size):
+                rgba.close()
+                return rendered
+            cropped = rgba.crop(bounds)
+            rgba.close()
+
+        try:
+            cropped.save(path, format="PNG")
+        finally:
+            cropped.close()
+    except (ImportError, OSError, ValueError):
+        return rendered
+
+    return rendered
+
+
 def build_bili_card_context(update: Any, published: str) -> dict[str, Any]:
     """Build an escaped, renderer-ready context from a normalized update."""
 

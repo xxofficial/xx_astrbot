@@ -16,7 +16,11 @@ from .bilibili import (
     normalize_bili_uid,
     should_at_all_subscription_target,
 )
-from .bili_card import build_bili_card_context, load_bili_card_template
+from .bili_card import (
+    build_bili_card_context,
+    load_bili_card_template,
+    trim_transparent_padding,
+)
 
 
 BILI_DEFAULT_UID = "10082742"
@@ -44,7 +48,7 @@ _TYPE_NAMES = {"dynamic": "动态", "video": "视频"}
 _BILI_TIMEZONE = timezone(timedelta(hours=8))
 
 
-@register("xx_bot", "XX", "B站账号动态与视频订阅推送", "2.3.1")
+@register("xx_bot", "XX", "B站账号动态与视频订阅推送", "2.3.2")
 class MyPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -335,7 +339,7 @@ class MyPlugin(Star):
                     "omit_background": True,
                 },
             )
-            return str(rendered or "").strip()
+            return trim_transparent_padding(rendered)
         except Exception as exc:
             logger.warning(
                 f"渲染B站{_TYPE_NAMES[update.kind]}蓝色卡片失败，将回退为普通消息: {exc}"

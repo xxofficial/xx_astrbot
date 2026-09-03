@@ -1,6 +1,14 @@
+from pathlib import Path
+import tempfile
 import unittest
 
-from bili_card import build_bili_card_context, load_bili_card_template
+from PIL import Image
+
+from bili_card import (
+    build_bili_card_context,
+    load_bili_card_template,
+    trim_transparent_padding,
+)
 from bilibili import BiliUpdate
 
 
@@ -68,6 +76,25 @@ class BiliCardContextTests(unittest.TestCase):
         self.assertIn("--card-scale", template)
         self.assertIn("root.clientWidth", template)
         self.assertIn("availableWidth / baseCardWidth", template)
+
+    def test_trims_only_transparent_screenshot_padding(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "card.png"
+            image = Image.new("RGBA", (20, 30), (0, 0, 0, 0))
+            image.paste((30, 120, 220, 255), (3, 4, 14, 19))
+            image.save(path)
+            image.close()
+
+            result = trim_transparent_padding(path)
+
+            self.assertEqual(result, str(path))
+            with Image.open(path) as cropped:
+                self.assertEqual(cropped.size, (11, 15))
+                self.assertEqual(cropped.getpixel((0, 0))[3], 255)
+
+    def test_trim_leaves_remote_render_urls_unchanged(self):
+        url = "https://example.com/rendered-card.png"
+        self.assertEqual(trim_transparent_padding(url), url)
 
 
 if __name__ == "__main__":
